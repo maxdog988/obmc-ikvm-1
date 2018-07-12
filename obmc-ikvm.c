@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <linux/videodev2.h>
+#include <rfb/keysym.h>
 #include <rfb/rfb.h>
 #include <rfb/rfbproto.h>
 #include <signal.h>
@@ -39,41 +40,135 @@
 #include <time.h>
 #include <unistd.h>
 
+#define _DEBUG_
+
+#ifdef _DEBUG_
+#define DBG(args...)	printf(args)
+#else
+#define DBG(args...)
+#endif /* _DEBUG_ */
+
 #define BITS_PER_SAMPLE		8
 #define BYTES_PER_PIXEL		4
 #define SAMPLES_PER_PIXEL	3
+#define REPORT_SIZE		8
 
 #define PROCESS_EVENTS_TIME_US	10000
 
 #define FRAME_SIZE_BYTE_LIMIT	127
 #define FRAME_SIZE_WORD_LIMIT	16383
 
+#define USBHID_KEY_A		0x04
+#define USBHID_KEY_B		0x05
+#define USBHID_KEY_C		0x06
+#define USBHID_KEY_D		0x07
+#define USBHID_KEY_E		0x08
+#define USBHID_KEY_F		0x09
+#define USBHID_KEY_G		0x0a
+#define USBHID_KEY_H		0x0b
+#define USBHID_KEY_I		0x0c
+#define USBHID_KEY_J		0x0d
+#define USBHID_KEY_K		0x0e
+#define USBHID_KEY_L		0x0f
+#define USBHID_KEY_M		0x10
+#define USBHID_KEY_N		0x11
+#define USBHID_KEY_O		0x12
+#define USBHID_KEY_P		0x13
+#define USBHID_KEY_Q		0x14
+#define USBHID_KEY_R		0x15
+#define USBHID_KEY_S		0x16
+#define USBHID_KEY_T		0x17
+#define USBHID_KEY_U		0x18
+#define USBHID_KEY_V		0x19
+#define USBHID_KEY_W		0x1a
+#define USBHID_KEY_X		0x1b
+#define USBHID_KEY_Y		0x1c
+#define USBHID_KEY_Z		0x1d
+#define USBHID_KEY_1		0x1e
+#define USBHID_KEY_2		0x1f
+#define USBHID_KEY_3		0x20
+#define USBHID_KEY_4		0x21
+#define USBHID_KEY_5		0x22
+#define USBHID_KEY_6		0x23
+#define USBHID_KEY_7		0x24
+#define USBHID_KEY_8		0x25
+#define USBHID_KEY_9		0x26
+#define USBHID_KEY_0		0x27
+#define USBHID_KEY_RETURN	0x28
+#define USBHID_KEY_ESC		0x29
+#define USBHID_KEY_BACKSPACE	0x2a
+#define USBHID_KEY_TAB		0x2b
+#define USBHID_KEY_SPACE	0x2c
+#define USBHID_KEY_MINUS	0x2d
+#define USBHID_KEY_EQUAL	0x2e
+#define USBHID_KEY_LEFTBRACE	0x2f
+#define USBHID_KEY_RIGHTBRACE	0x30
+#define USBHID_KEY_BACKSLASH	0x31
+#define USBHID_KEY_HASH		0x32
+#define USBHID_KEY_SEMICOLON	0x33
+#define USBHID_KEY_APOSTROPHE	0x34
+#define USBHID_KEY_GRAVE	0x35
+#define USBHID_KEY_COMMA	0x36
+#define USBHID_KEY_DOT		0x37
+#define USBHID_KEY_SLASH	0x38
+#define USBHID_KEY_CAPSLOCK	0x39
+#define USBHID_KEY_F1		0x3a
+#define USBHID_KEY_F2		0x3b
+#define USBHID_KEY_F3		0x3c
+#define USBHID_KEY_F4		0x3d
+#define USBHID_KEY_F5		0x3e
+#define USBHID_KEY_F6		0x3f
+#define USBHID_KEY_F7		0x40
+#define USBHID_KEY_F8		0x41
+#define USBHID_KEY_F9		0x42
+#define USBHID_KEY_F10		0x43
+#define USBHID_KEY_F11		0x44
+#define USBHID_KEY_F12		0x45
+#define USBHID_KEY_PRINT	0x46
+#define USBHID_KEY_SCROLLLOCK	0x47
+#define USBHID_KEY_PAUSE	0x48
+#define USBHID_KEY_INSERT	0x49
+#define USBHID_KEY_HOME		0x4a
+#define USBHID_KEY_PAGEUP	0x4b
+#define USBHID_KEY_DELETE	0x4c
+#define USBHID_KEY_END		0x4d
+#define USBHID_KEY_PAGEDOWN	0x4e
+#define USBHID_KEY_RIGHT	0x4f
+#define USBHID_KEY_LEFT		0x50
+#define USBHID_KEY_DOWN		0x51
+#define USBHID_KEY_UP		0x52
+#define USBHID_KEY_NUMLOCK	0x53
+
 static volatile bool ok = true;
 
 struct resolution {
 	size_t height;
 	size_t width;
-	size_t size;
 };
 
 struct obmc_ikvm {
 	bool do_delay;
+	bool send_report;
 	int num_clients;
 	int videodev_fd;
 	int frame_size;
 	int frame_buf_size;
+	int keyboard_fd;
 	struct resolution resolution;
 	char *frame;
+	char *keyboard_name;
 	char *videodev_name;
+	unsigned char report[REPORT_SIZE];
+	unsigned short report_map[REPORT_SIZE - 2];
 	rfbScreenInfoPtr server;
 };
 
-void int_handler(int sig)
+static void int_handler(int sig)
 {
 	ok = false;
 }
 
-int init_videodev(struct obmc_ikvm *ikvm)
+static int init_videodev(struct obmc_ikvm *ikvm)
 {
 	int rc;
 	struct v4l2_capability cap;
@@ -109,12 +204,9 @@ int init_videodev(struct obmc_ikvm *ikvm)
 
 	ikvm->resolution.height = fmt.fmt.pix.height;
 	ikvm->resolution.width = fmt.fmt.pix.width;
-	ikvm->resolution.size = fmt.fmt.pix.sizeimage;
 
 	ikvm->frame_buf_size = ikvm->resolution.height *
 		ikvm->resolution.width * BYTES_PER_PIXEL;
-	if (ikvm->resolution.size > ikvm->frame_buf_size)
-		ikvm->frame_buf_size = ikvm->resolution.size;
 
 	ikvm->frame = (char *)malloc(ikvm->frame_buf_size);
 	if (!ikvm->frame) {
@@ -122,11 +214,276 @@ int init_videodev(struct obmc_ikvm *ikvm)
 		return -ENOMEM;
 	}
 
+	DBG("frame buffer size: %d\n", ikvm->frame_buf_size);
 	memset(ikvm->frame, 0, ikvm->frame_buf_size);
 
 	return 0;
 }
 
+static unsigned char key_to_mod(rfbKeySym key)
+{
+	unsigned char mod = 0;
+
+	if (key >= XK_Shift_L && key <= XK_Control_R) {
+		static const unsigned char map[] = {
+			0x02,	// left shift
+			0x20,	// right shift
+			0x01,	// left control
+			0x10	// right control
+		};
+
+		mod = map[key - XK_Shift_L];
+	} else if (key >= XK_Meta_L && key <= XK_Alt_R) {
+		static const unsigned char map[] = {
+			0x08,	// left meta
+			0x80,	// right meta
+			0x04,	// left alt
+			0x40	// right alt
+		};
+
+		mod = map[key - XK_Meta_L];
+	}
+
+	return mod;
+}
+
+static char key_to_scancode(rfbKeySym key)
+{
+	char scancode = 0;
+
+	if ((key >= 'A' && key <= 'Z') || (key >= 'a' && key <= 'z')) {
+		scancode = USBHID_KEY_A + ((key & 0x5F) - 'A');
+	} else if (key >= '1' && key <= '9') {
+		scancode = USBHID_KEY_1 + (key - '1');
+	} else if (key >= XK_F1 && key <= XK_F12) {
+		scancode = USBHID_KEY_F1 + (key - XK_F1);
+	} else {
+		switch (key) {
+		case XK_exclam:
+			scancode = USBHID_KEY_1;
+			break;
+		case XK_at:
+			scancode = USBHID_KEY_2;
+			break;
+		case XK_numbersign:
+			scancode = USBHID_KEY_3;
+			break;
+		case XK_dollar:
+			scancode = USBHID_KEY_4;
+			break;
+		case XK_percent:
+			scancode = USBHID_KEY_5;
+			break;
+		case XK_asciicircum:
+			scancode = USBHID_KEY_6;
+			break;
+		case XK_ampersand:
+			scancode = USBHID_KEY_7;
+			break;
+		case XK_asterisk:
+			scancode = USBHID_KEY_8;
+			break;
+		case XK_parenleft:
+			scancode = USBHID_KEY_9;
+			break;
+		case XK_0:
+		case XK_parenright:
+			scancode = USBHID_KEY_0;
+			break;
+		case XK_Return:
+			scancode = USBHID_KEY_RETURN;
+			break;
+		case XK_Escape:
+			scancode = USBHID_KEY_ESC;
+			break;
+		case XK_BackSpace:
+			scancode = USBHID_KEY_BACKSPACE;
+			break;
+		case XK_Tab:
+			scancode = USBHID_KEY_TAB;
+			break;
+		case XK_space:
+			scancode = USBHID_KEY_SPACE;
+			break;
+		case XK_minus:
+		case XK_underscore:
+			scancode = USBHID_KEY_MINUS;
+			break;
+		case XK_plus:
+		case XK_equal:
+			scancode = USBHID_KEY_EQUAL;
+			break;
+		case XK_bracketleft:
+		case XK_braceleft:
+			scancode = USBHID_KEY_LEFTBRACE;
+			break;
+		case XK_bracketright:
+		case XK_braceright:
+			scancode = USBHID_KEY_RIGHTBRACE;
+			break;
+		case XK_backslash:
+		case XK_bar:
+			scancode = USBHID_KEY_BACKSLASH;
+			break;
+		case XK_colon:
+		case XK_semicolon:
+			scancode = USBHID_KEY_SEMICOLON;
+			break;
+		case XK_quotedbl:
+		case XK_apostrophe:
+			scancode = USBHID_KEY_APOSTROPHE;
+			break;
+		case XK_grave:
+		case XK_asciitilde:
+			scancode = USBHID_KEY_GRAVE;
+			break;
+		case XK_comma:
+		case XK_less:
+			scancode = USBHID_KEY_COMMA;
+			break;
+		case XK_period:
+		case XK_greater:
+			scancode = USBHID_KEY_DOT;
+			break;
+		case XK_slash:
+		case XK_question:
+			scancode = USBHID_KEY_SLASH;
+			break;
+		case XK_Caps_Lock:
+			scancode = USBHID_KEY_CAPSLOCK;
+			break;
+		case XK_Print:
+			scancode = USBHID_KEY_PRINT;
+			break;
+		case XK_Scroll_Lock:
+			scancode = USBHID_KEY_SCROLLLOCK;
+			break;
+		case XK_Pause:
+			scancode = USBHID_KEY_PAUSE;
+			break;
+		case XK_Insert:
+			scancode = USBHID_KEY_INSERT;
+			break;
+		case XK_Home:
+			scancode = USBHID_KEY_HOME;
+			break;
+		case XK_Page_Up:
+			scancode = USBHID_KEY_PAGEUP;
+			break;
+		case XK_Delete:
+			scancode = USBHID_KEY_DELETE;
+			break;
+		case XK_End:
+			scancode = USBHID_KEY_END;
+			break;
+		case XK_Page_Down:
+			scancode = USBHID_KEY_PAGEDOWN;
+			break;
+		case XK_Right:
+			scancode = USBHID_KEY_RIGHT;
+			break;
+		case XK_Left:
+			scancode = USBHID_KEY_LEFT;
+			break;
+		case XK_Down:
+			scancode = USBHID_KEY_DOWN;
+			break;
+		case XK_Up:
+			scancode = USBHID_KEY_UP;
+			break;
+		case XK_Num_Lock:
+			scancode = USBHID_KEY_NUMLOCK;
+			break;
+		}
+	}
+
+	return scancode;
+}
+
+static void key_event(rfbBool down, rfbKeySym key, rfbClientPtr cl)
+{
+	struct obmc_ikvm *ikvm = cl->screen->screenData;
+
+	DBG("key event %s %x\n", down ? "down" : "up", key);
+
+	if (down) {
+		char sc = key_to_scancode(key);
+
+		if (sc) {
+			unsigned int i;
+
+			for (i = 2; i < REPORT_SIZE; ++i) {
+				if (!ikvm->report[i]) {
+					ikvm->report[i] = sc;
+					ikvm->report_map[i - 2] = key;
+					goto update_send_report;
+				}
+			}
+
+			DBG("no space in report for additional key press!\n");
+			return;
+		} else {
+			unsigned char mod = key_to_mod(key);
+
+			if (mod) {
+				ikvm->report[0] |= mod;
+				goto update_send_report;
+			}
+
+			return;
+		}
+	} else {
+		unsigned char mod;
+		unsigned int i;
+
+		for (i = 0; i < REPORT_SIZE - 2; ++i) {
+			if (ikvm->report_map[i] == key) {
+				ikvm->report_map[i] = 0;
+				ikvm->report[i + 2] = 0;
+				goto update_send_report;
+			}
+		}
+
+		mod = key_to_mod(key);
+		if (mod) {
+			ikvm->report[0] &= ~mod;
+			goto update_send_report;
+		}
+
+		return;
+	}
+
+update_send_report:
+	ikvm->send_report = true;
+}
+
+static void init_keyboard(struct obmc_ikvm *ikvm)
+{
+	ikvm->keyboard_fd = open(ikvm->keyboard_name, O_RDWR);
+	if (ikvm->keyboard_fd < 0) {
+		printf("failed to open %s: %d %s\n", ikvm->keyboard_name,
+		       errno, strerror(errno));
+		return;
+	}
+
+	ikvm->server->kbdAddEvent = key_event;
+}
+
+static void keyboard_send_report(struct obmc_ikvm *ikvm)
+{
+	if (ikvm->send_report) {
+		unsigned char *data = ikvm->report;
+
+		DBG("sending kbd report[%02x%02x%02x%02x%02x%02x%02x%02x]\n",
+		    data[0], data[1], data[2], data[3], data[4], data[5],
+		    data[6], data[7]);
+		if (write(ikvm->keyboard_fd, data, REPORT_SIZE) != REPORT_SIZE)
+			printf("failed to write keyboard report: %d %s\n",
+			       errno, strerror(errno));
+
+		ikvm->send_report = false;
+	}
+}
 
 static void client_gone(rfbClientPtr cl)
 {
@@ -164,7 +521,7 @@ static enum rfbNewClientAction new_client(rfbClientPtr cl)
 	return RFB_CLIENT_ACCEPT;
 }
 
-int init_server(struct obmc_ikvm *ikvm, int *argc, char **argv)
+static int init_server(struct obmc_ikvm *ikvm, int *argc, char **argv)
 {
 	ikvm->server = rfbGetScreen(argc, argv, ikvm->resolution.width,
 				    ikvm->resolution.height, BITS_PER_SAMPLE,
@@ -188,7 +545,7 @@ int init_server(struct obmc_ikvm *ikvm, int *argc, char **argv)
 	return 0;
 }
 
-void send_frame_to_clients(struct obmc_ikvm *ikvm)
+static void send_frame_to_clients(struct obmc_ikvm *ikvm)
 {
 	rfbClientIteratorPtr iterator = rfbGetClientIterator(ikvm->server);
 	rfbClientPtr cl;
@@ -226,7 +583,7 @@ void send_frame_to_clients(struct obmc_ikvm *ikvm)
 	rfbReleaseClientIterator(iterator);
 }
 
-int get_frame(struct obmc_ikvm *ikvm)
+static int get_frame(struct obmc_ikvm *ikvm)
 {
 	int rc;
 /*
@@ -239,12 +596,15 @@ int get_frame(struct obmc_ikvm *ikvm)
 			offs = 3;
 	}
 */
-	rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->resolution.size);
+	rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
 	if (rc < 0) {
 		printf("failed to read frame: %d %s\n", errno,
 		       strerror(errno));
 		return -EFAULT;
 	}
+
+	if (rc != ikvm->frame_size)
+		DBG("new frame size: %d\n", rc);
 
 	ikvm->frame_size = rc;
 /*
@@ -274,8 +634,8 @@ int get_frame(struct obmc_ikvm *ikvm)
 	return 0;
 }
 
-int timespec_subtract(struct timespec *result, struct timespec *x,
-		      struct timespec *y)
+static int timespec_subtract(struct timespec *result, struct timespec *x,
+			     struct timespec *y)
 {
 	/* Perform the carry for the later subtraction by updating y. */
 	if (x->tv_nsec < y->tv_nsec) {
@@ -309,9 +669,9 @@ int main(int argc, char **argv)
 	int len;
 	int option;
 	int rc;
-	const char *opts = "v:h";
+	const char *opts = "k:v:";
 	struct option lopts[] = {
-		{ "help", 0, 0, 'h' },
+		{ "keyboard", 1, 0, 'k' },
 		{ "videodev", 1, 0, 'v' },
 		{ 0, 0, 0, 0 }
 	};
@@ -319,16 +679,23 @@ int main(int argc, char **argv)
 
 	memset(&ikvm, 0, sizeof(struct obmc_ikvm));
 	ikvm.videodev_fd = -1;
+	ikvm.keyboard_fd = -1;
 
 	while ((option = getopt_long(argc, argv, opts, lopts, NULL)) != -1) {
 		switch (option) {
-		case 'h':
-
+		case 'k':
+			ikvm.keyboard_name = malloc(strlen(optarg) + 1);
+			if (!ikvm.keyboard_name)
+				printf("failed to allocate keyboard name\n");
+			else
+				strcpy(ikvm.keyboard_name, optarg);
 			break;
 		case 'v':
 			ikvm.videodev_name = malloc(strlen(optarg) + 1);
-			if (!ikvm.videodev_name)
-				return -ENOMEM;
+			if (!ikvm.videodev_name) {
+				rc = -ENOMEM;
+				goto done;
+			}
 
 			strcpy(ikvm.videodev_name, optarg);
 			break;
@@ -342,6 +709,9 @@ int main(int argc, char **argv)
 	rc = init_server(&ikvm, &argc, argv);
 	if (rc)
 		goto done;
+
+	if (ikvm.keyboard_name)
+		init_keyboard(&ikvm);
 
 	signal(SIGINT, int_handler);
 
@@ -373,6 +743,8 @@ int main(int argc, char **argv)
 		if (!ok)
 			break;
 
+		keyboard_send_report(&ikvm);
+
 		rc = get_frame(&ikvm);
 		if (rc)
 			break;
@@ -387,6 +759,12 @@ done:
 
 	if (ikvm.videodev_fd >= 0)
 		close(ikvm.videodev_fd);
+
+	if (ikvm.keyboard_fd >= 0)
+		close(ikvm.keyboard_fd);
+
+	if (ikvm.keyboard_name)
+		free(ikvm.keyboard_name);
 
 	if (ikvm.videodev_name)
 		free(ikvm.videodev_name);
