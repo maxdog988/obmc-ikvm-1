@@ -48,6 +48,8 @@
 #define DBG(args...)
 #endif /* _DEBUG_ */
 
+#define DUMP_FRAME_DIR		"/tmp/obmc-ikvm_frames"
+
 #define BITS_PER_SAMPLE		8
 #define BYTES_PER_PIXEL		4
 #define SAMPLES_PER_PIXEL	3
@@ -147,13 +149,16 @@ struct resolution {
 };
 
 struct obmc_ikvm {
+	bool ast_compression;
 	bool do_delay;
+	bool dump_frames;
 	bool send_report;
 	int num_clients;
 	int videodev_fd;
 	int frame_size;
 	int frame_buf_size;
 	int keyboard_fd;
+	int dump_frame_idx;
 	struct resolution resolution;
 	char *frame;
 	char *keyboard_name;
@@ -200,6 +205,16 @@ static int init_videodev(struct obmc_ikvm *ikvm)
 		printf("failed to query format: %d %s\n", errno,
 		       strerror(errno));
 		return -EINVAL;
+	}
+
+	if (ikvm->ast_compression) {
+		fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV444;
+		rc = ioctl(ikvm->videodev_fd, VIDIOC_S_FMT, &fmt);
+		if (rc < 0) {
+			printf("failed to set ast compression fmt: %d %s\n",
+			       errno, strerror(errno));
+			ikvm->ast_compression = false;
+		}
 	}
 
 	ikvm->resolution.height = fmt.fmt.pix.height;
@@ -664,13 +679,39 @@ static int timespec_subtract(struct timespec *result, struct timespec *x,
 	return x->tv_sec < y->tv_sec;
 }
 
+static void dump_frame(struct obmc_ikvm *ikvm)
+{
+	int fd;
+	int rc;
+	char path[256];
+
+	snprintf(path, 256, "%s/frame%03d.bin", DUMP_FRAME_DIR,
+		 ikvm->dump_frame_idx++);
+
+	fd = open(path, O_WRONLY | O_CREAT, 0666);
+	if (fd < 0) {
+		printf("failed to open %s: %d %s\n", path, errno,
+		       strerror(errno));
+		return;
+	}
+
+	rc = write(fd, ikvm->frame, ikvm->frame_size);
+	if (rc < ikvm->frame_size)
+		printf("failed to write frame: %d %s\n", errno,
+		       strerror(errno));
+
+	close(fd);
+}
+
 int main(int argc, char **argv)
 {
 	int len;
 	int option;
 	int rc;
-	const char *opts = "k:v:";
+	const char *opts = "adk:v:";
 	struct option lopts[] = {
+		{ "ast_compression", 0, 0, 'a' },
+		{ "dump_frames", 0, 0, 'd' },
 		{ "keyboard", 1, 0, 'k' },
 		{ "videodev", 1, 0, 'v' },
 		{ 0, 0, 0, 0 }
@@ -683,6 +724,18 @@ int main(int argc, char **argv)
 
 	while ((option = getopt_long(argc, argv, opts, lopts, NULL)) != -1) {
 		switch (option) {
+		case 'a':
+			ikvm.ast_compression = true;
+			break;
+		case 'd':
+			ikvm.dump_frames = true;
+			rc = mkdir(DUMP_FRAME_DIR, 0777);
+			if (rc) {
+				printf("failed to create dir %s: %d %s\n",
+				       DUMP_FRAME_DIR, errno, strerror(errno));
+				ikvm.dump_frames = false;
+			}
+			break;
 		case 'k':
 			ikvm.keyboard_name = malloc(strlen(optarg) + 1);
 			if (!ikvm.keyboard_name)
@@ -716,8 +769,19 @@ int main(int argc, char **argv)
 	signal(SIGINT, int_handler);
 
 	while (ok) {
-		while (ikvm.server->clientHead == NULL && ok)
+		while (ikvm.server->clientHead == NULL && ok) {
 			rfbProcessEvents(ikvm.server, PROCESS_EVENTS_TIME_US);
+
+			if (ikvm.dump_frames) {
+				rc = get_frame(&ikvm);
+				if (rc) {
+					ok = false;
+					break;
+				}
+
+				dump_frame(&ikvm);
+			}
+		}
 
 		if (ikvm.do_delay) {
 			struct timespec diff;
@@ -748,6 +812,9 @@ int main(int argc, char **argv)
 		rc = get_frame(&ikvm);
 		if (rc)
 			break;
+
+		if (ikvm.dump_frames)
+			dump_frame(&ikvm);
 	}
 
 done:
