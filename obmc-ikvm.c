@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <linux/videodev2.h>
+#include <pthread.h>
 #include <rfb/keysym.h>
 #include <rfb/rfb.h>
 #include <rfb/rfbproto.h>
@@ -40,13 +41,53 @@
 #include <time.h>
 #include <unistd.h>
 
-#define _DEBUG_
+//#define _DEBUG_
+#define _PROFILE_
 
 #ifdef _DEBUG_
 #define DBG(args...)	printf(args)
 #else
 #define DBG(args...)
 #endif /* _DEBUG_ */
+
+#ifdef _PROFILE_
+#define PROFILE_SAMPLES		512ULL
+
+struct profile {
+	bool rolled_over;
+	unsigned int idx;
+	unsigned long long times[PROFILE_SAMPLES];
+};
+
+unsigned long long _avg(struct profile *p)
+{
+	unsigned int i;
+	unsigned int limit = p->rolled_over ? PROFILE_SAMPLES : p->idx + 1;
+	unsigned long long rc = 0;
+
+	for (i = 0; i < limit; ++i)
+		rc += (p->times[i] / limit);
+
+	return rc;
+}
+
+void _prof(struct timespec *diff, struct profile *p)
+{
+	unsigned long long usec = diff->tv_nsec / 1000ULL;
+
+	if (diff->tv_sec)
+		usec += 1000000ULL;
+
+	p->times[p->idx++] = usec;
+	if (p->idx >= PROFILE_SAMPLES) {
+		p->rolled_over = true;
+		p->idx = 0;
+	}
+}
+
+struct profile _frame;
+struct profile _wait;
+#endif /* _PROFILE_ */
 
 #define DUMP_FRAME_DIR		"/tmp/obmc-ikvm_frames"
 
@@ -55,7 +96,8 @@
 #define SAMPLES_PER_PIXEL	3
 #define REPORT_SIZE		8
 
-#define PROCESS_EVENTS_TIME_US	10000
+#define DELAY_COUNT		24
+#define PROCESS_EVENTS_TIME_US	40000 /* 24 fps */
 
 #define FRAME_SIZE_BYTE_LIMIT	127
 #define FRAME_SIZE_WORD_LIMIT	16383
@@ -142,6 +184,8 @@
 #define USBHID_KEY_NUMLOCK	0x53
 
 static volatile bool ok = true;
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct resolution {
 	size_t height;
@@ -150,9 +194,9 @@ struct resolution {
 
 struct obmc_ikvm {
 	bool ast_compression;
-	bool do_delay;
 	bool dump_frames;
 	bool send_report;
+	int delay_count;
 	int num_clients;
 	int videodev_fd;
 	int frame_size;
@@ -531,7 +575,7 @@ static enum rfbNewClientAction new_client(rfbClientPtr cl)
 	cl->clientGoneHook = client_gone;
 
 	ikvm->num_clients++;
-	ikvm->do_delay = true;
+	ikvm->delay_count = DELAY_COUNT;
 
 	return RFB_CLIENT_ACCEPT;
 }
@@ -655,16 +699,16 @@ static int timespec_subtract(struct timespec *result, struct timespec *x,
 	/* Perform the carry for the later subtraction by updating y. */
 	if (x->tv_nsec < y->tv_nsec) {
 		long long int nsec =
-			((y->tv_nsec - x->tv_nsec) / 1000000000) + 1;
+			((y->tv_nsec - x->tv_nsec) / 1000000000ULL) + 1;
 
-		y->tv_nsec -= 1000000000 * nsec;
+		y->tv_nsec -= 1000000000ULL * nsec;
 		y->tv_sec += nsec;
 	}
 
-	if (x->tv_nsec - y->tv_nsec > 1000000000) {
-		int nsec = (x->tv_nsec - y->tv_nsec) / 1000000000;
+	if (x->tv_nsec - y->tv_nsec > 1000000000ULL) {
+		long long int nsec = (x->tv_nsec - y->tv_nsec) / 1000000000ULL;
 
-		y->tv_nsec += 1000000000 * nsec;
+		y->tv_nsec += 1000000000ULL * nsec;
 		y->tv_sec -= nsec;
 	}
 
@@ -703,6 +747,22 @@ static void dump_frame(struct obmc_ikvm *ikvm)
 	close(fd);
 }
 
+void *threaded_process_rfb(void *ptr)
+{
+	struct obmc_ikvm *ikvm = (struct obmc_ikvm *)ptr;
+
+	while (ok) {
+		rfbProcessEvents(ikvm->server, PROCESS_EVENTS_TIME_US);
+
+		if (ikvm->server->clientHead != NULL && ok)
+			keyboard_send_report(ikvm);
+
+		pthread_mutex_lock(&mutex);
+		pthread_cond_broadcast(&cond);
+		pthread_mutex_unlock(&mutex);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	int len;
@@ -717,6 +777,10 @@ int main(int argc, char **argv)
 		{ 0, 0, 0, 0 }
 	};
 	struct obmc_ikvm ikvm;
+	struct timespec diff;
+	struct timespec end;
+	struct timespec start;
+	pthread_t rfb;
 
 	memset(&ikvm, 0, sizeof(struct obmc_ikvm));
 	ikvm.videodev_fd = -1;
@@ -768,54 +832,53 @@ int main(int argc, char **argv)
 
 	signal(SIGINT, int_handler);
 
+	pthread_create(&rfb, NULL, threaded_process_rfb, &ikvm);
+
 	while (ok) {
-		while (ikvm.server->clientHead == NULL && ok) {
-			rfbProcessEvents(ikvm.server, PROCESS_EVENTS_TIME_US);
+		if (ikvm.delay_count)
+			ikvm.delay_count--;
+		else if (ikvm.server->clientHead != NULL || ikvm.dump_frames) {
+#ifdef _PROFILE_
+			clock_gettime(CLOCK_MONOTONIC, &start);
+#endif /* _PROFILE_ */
+			rc = get_frame(&ikvm);
+			if (rc) {
+				ok = false;
+				break;
+			}
 
-			if (ikvm.dump_frames) {
-				rc = get_frame(&ikvm);
-				if (rc) {
-					ok = false;
-					break;
-				}
-
+			if (ikvm.dump_frames)
 				dump_frame(&ikvm);
-			}
-		}
-
-		if (ikvm.do_delay) {
-			struct timespec diff;
-			struct timespec end;
-			struct timespec now;
-
-			ikvm.do_delay = false;
-
+#ifdef _PROFILE_
 			clock_gettime(CLOCK_MONOTONIC, &end);
-			now = end;
-			end.tv_sec++;
-			end.tv_nsec += 500000000;
-
-			while (!timespec_subtract(&diff, &end, &now)) {
-				rfbProcessEvents(ikvm.server,
-						 PROCESS_EVENTS_TIME_US);
-				clock_gettime(CLOCK_MONOTONIC, &now);
-			}
+			timespec_subtract(&diff, &end, &start);
+			_prof(&diff, &_frame);
+			DBG("frame: %lld.%.9ld\n", (long long)diff.tv_sec,
+			    diff.tv_nsec);
+#endif /* _PROFILE */
 		}
 
-		rfbProcessEvents(ikvm.server, PROCESS_EVENTS_TIME_US);
-
-		if (!ok)
-			break;
-
-		keyboard_send_report(&ikvm);
-
-		rc = get_frame(&ikvm);
-		if (rc)
-			break;
-
-		if (ikvm.dump_frames)
-			dump_frame(&ikvm);
+#ifdef _PROFILE_
+		clock_gettime(CLOCK_MONOTONIC, &start);
+#endif /* _PROFILE_ */
+		pthread_mutex_lock(&mutex);
+		pthread_cond_wait(&cond, &mutex);
+		pthread_mutex_unlock(&mutex);
+#ifdef _PROFILE_
+		clock_gettime(CLOCK_MONOTONIC, &end);
+		timespec_subtract(&diff, &end, &start);
+		_prof(&diff, &_wait);
+		DBG("waited: %lld.%.9ld\n", (long long)diff.tv_sec,
+		    diff.tv_nsec);
+#endif /* _PROFILE_ */
 	}
+
+	pthread_join(rfb, NULL);
+
+#ifdef _PROFILE_
+	printf("avg frame time (us): %lld\n", _avg(&_frame));
+	printf("avg wait time (us): %lld\n", _avg(&_wait));
+#endif /* _PROFILE_ */
 
 done:
 	if (ikvm.server)
