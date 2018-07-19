@@ -41,8 +41,8 @@
 #include <time.h>
 #include <unistd.h>
 
-//#define _DEBUG_
-#define _PROFILE_
+#define _DEBUG_
+//#define _PROFILE_
 
 #ifdef _DEBUG_
 #define DBG(args...)	printf(args)
@@ -94,6 +94,7 @@ struct profile _wait;
 #define BITS_PER_SAMPLE		8
 #define BYTES_PER_PIXEL		4
 #define SAMPLES_PER_PIXEL	3
+#define PTR_SIZE		3
 #define REPORT_SIZE		8
 
 #define DELAY_COUNT		24
@@ -195,6 +196,7 @@ struct resolution {
 struct obmc_ikvm {
 	bool ast_compression;
 	bool dump_frames;
+	bool send_ptr;
 	bool send_report;
 	int delay_count;
 	int num_clients;
@@ -202,11 +204,14 @@ struct obmc_ikvm {
 	int frame_size;
 	int frame_buf_size;
 	int keyboard_fd;
+	int ptr_fd;
 	int dump_frame_idx;
 	struct resolution resolution;
 	char *frame;
 	char *keyboard_name;
+	char *ptr_name;
 	char *videodev_name;
+	char ptr[PTR_SIZE];
 	unsigned char report[REPORT_SIZE];
 	unsigned short report_map[REPORT_SIZE - 2];
 	rfbScreenInfoPtr server;
@@ -544,6 +549,48 @@ static void keyboard_send_report(struct obmc_ikvm *ikvm)
 	}
 }
 
+static void ptr_event(int button_mask, int x, int y, rfbClientPtr cl)
+{
+	struct obmc_ikvm *ikvm = cl->screen->screenData;
+
+	DBG("ptr event btn[%x] x[%d] y[%d]\n", button_mask, x, y);
+
+	ikvm->ptr[0] = button_mask & 0xFF;
+	if (abs(x) < ikvm->resolution.width)
+		ikvm->ptr[1] = x / (ikvm->resolution.width / 128);
+	if (abs(y) < ikvm->resolution.height)
+		ikvm->ptr[2] = y / (ikvm->resolution.height / 128);
+
+	ikvm->send_ptr = true;
+
+	rfbDefaultPtrAddEvent(button_mask, x, y, cl);
+}
+
+static void init_ptr(struct obmc_ikvm *ikvm)
+{
+	ikvm->ptr_fd = open(ikvm->ptr_name, O_RDWR);
+	if (ikvm->ptr_fd < 0) {
+		printf("failed to open %s: %d %s\n", ikvm->ptr_name, errno,
+		       strerror(errno));
+		return;
+	}
+
+	ikvm->server->ptrAddEvent = ptr_event;
+}
+
+static void ptr_send_report(struct obmc_ikvm *ikvm)
+{
+	if (ikvm->send_ptr) {
+		DBG("sending ptr report[%02x%02x%02x]\n", ikvm->ptr[0],
+		    ikvm->ptr[1], ikvm->ptr[2]);
+		if (write(ikvm->ptr_fd, ikvm->ptr, PTR_SIZE) != PTR_SIZE)
+			printf("failed to write ptr report: %d %s\n", errno,
+			       strerror(errno));
+
+		ikvm->send_ptr = false;
+	}
+}
+
 static void client_gone(rfbClientPtr cl)
 {
 	struct obmc_ikvm *ikvm = cl->clientData;
@@ -754,8 +801,10 @@ void *threaded_process_rfb(void *ptr)
 	while (ok) {
 		rfbProcessEvents(ikvm->server, PROCESS_EVENTS_TIME_US);
 
-		if (ikvm->server->clientHead != NULL && ok)
+		if (ikvm->server->clientHead != NULL && ok) {
 			keyboard_send_report(ikvm);
+			ptr_send_report(ikvm);
+		}
 
 		pthread_mutex_lock(&mutex);
 		pthread_cond_broadcast(&cond);
@@ -768,11 +817,12 @@ int main(int argc, char **argv)
 	int len;
 	int option;
 	int rc;
-	const char *opts = "adk:v:";
+	const char *opts = "adk:p:v:";
 	struct option lopts[] = {
 		{ "ast_compression", 0, 0, 'a' },
 		{ "dump_frames", 0, 0, 'd' },
 		{ "keyboard", 1, 0, 'k' },
+		{ "pointer", 1, 0, 'p' },
 		{ "videodev", 1, 0, 'v' },
 		{ 0, 0, 0, 0 }
 	};
@@ -785,6 +835,7 @@ int main(int argc, char **argv)
 	memset(&ikvm, 0, sizeof(struct obmc_ikvm));
 	ikvm.videodev_fd = -1;
 	ikvm.keyboard_fd = -1;
+	ikvm.ptr_fd = -1;
 
 	while ((option = getopt_long(argc, argv, opts, lopts, NULL)) != -1) {
 		switch (option) {
@@ -806,6 +857,13 @@ int main(int argc, char **argv)
 				printf("failed to allocate keyboard name\n");
 			else
 				strcpy(ikvm.keyboard_name, optarg);
+			break;
+		case 'p':
+			ikvm.ptr_name = malloc(strlen(optarg) + 1);
+			if (!ikvm.ptr_name)
+				printf("failed to allocate ptr name\n");
+			else
+				strcpy(ikvm.ptr_name, optarg);
 			break;
 		case 'v':
 			ikvm.videodev_name = malloc(strlen(optarg) + 1);
@@ -829,6 +887,9 @@ int main(int argc, char **argv)
 
 	if (ikvm.keyboard_name)
 		init_keyboard(&ikvm);
+
+	if (ikvm.ptr_name)
+		init_ptr(&ikvm);
 
 	signal(SIGINT, int_handler);
 
@@ -893,8 +954,14 @@ done:
 	if (ikvm.keyboard_fd >= 0)
 		close(ikvm.keyboard_fd);
 
+	if (ikvm.ptr_fd >= 0)
+		close(ikvm.ptr_fd);
+
 	if (ikvm.keyboard_name)
 		free(ikvm.keyboard_name);
+
+	if (ikvm.ptr_name)
+		free(ikvm.ptr_name);
 
 	if (ikvm.videodev_name)
 		free(ikvm.videodev_name);
