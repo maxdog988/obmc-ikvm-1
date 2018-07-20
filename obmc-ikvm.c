@@ -94,8 +94,8 @@ struct profile _wait;
 #define BITS_PER_SAMPLE		8
 #define BYTES_PER_PIXEL		4
 #define SAMPLES_PER_PIXEL	3
-#define PTR_SIZE		3
-#define REPORT_SIZE		8
+#define PTR_SIZE		4
+#define REPORT_SIZE		7
 
 #define DELAY_COUNT		24
 #define PROCESS_EVENTS_TIME_US	40000 /* 24 fps */
@@ -530,18 +530,21 @@ static void init_keyboard(struct obmc_ikvm *ikvm)
 		return;
 	}
 
+	ikvm->ptr_fd = ikvm->keyboard_fd;
 	ikvm->server->kbdAddEvent = key_event;
 }
 
 static void keyboard_send_report(struct obmc_ikvm *ikvm)
 {
 	if (ikvm->send_report) {
-		unsigned char *data = ikvm->report;
+		char rpt[REPORT_SIZE + 1];
 
+		rpt[0] = 1;
+		memcpy(&rpt[1], &ikvm->report, REPORT_SIZE);
 		DBG("sending kbd report[%02x%02x%02x%02x%02x%02x%02x%02x]\n",
-		    data[0], data[1], data[2], data[3], data[4], data[5],
-		    data[6], data[7]);
-		if (write(ikvm->keyboard_fd, data, REPORT_SIZE) != REPORT_SIZE)
+		    rpt[0], rpt[1], rpt[2], rpt[3], rpt[4], rpt[5], rpt[6],
+		    rpt[7]);
+		if (write(ikvm->keyboard_fd, rpt, sizeof(rpt)) != sizeof(rpt))
 			printf("failed to write keyboard report: %d %s\n",
 			       errno, strerror(errno));
 
@@ -568,12 +571,14 @@ static void ptr_event(int button_mask, int x, int y, rfbClientPtr cl)
 
 static void init_ptr(struct obmc_ikvm *ikvm)
 {
+/*
 	ikvm->ptr_fd = open(ikvm->ptr_name, O_RDWR);
 	if (ikvm->ptr_fd < 0) {
 		printf("failed to open %s: %d %s\n", ikvm->ptr_name, errno,
 		       strerror(errno));
 		return;
 	}
+*/
 
 	ikvm->server->ptrAddEvent = ptr_event;
 }
@@ -581,9 +586,13 @@ static void init_ptr(struct obmc_ikvm *ikvm)
 static void ptr_send_report(struct obmc_ikvm *ikvm)
 {
 	if (ikvm->send_ptr) {
-		DBG("sending ptr report[%02x%02x%02x]\n", ikvm->ptr[0],
-		    ikvm->ptr[1], ikvm->ptr[2]);
-		if (write(ikvm->ptr_fd, ikvm->ptr, PTR_SIZE) != PTR_SIZE)
+		char rpt[PTR_SIZE + 1];
+
+		rpt[0] = 2;
+		memcpy(&rpt[1], ikvm->ptr, PTR_SIZE);
+		DBG("sending ptr report[%02x%02x%02x%02x%02x]\n", rpt[0],
+		    rpt[1], rpt[2], rpt[3], rpt[4]);
+		if (write(ikvm->ptr_fd, rpt, sizeof(rpt)) != sizeof(rpt))
 			printf("failed to write ptr report: %d %s\n", errno,
 			       strerror(errno));
 
@@ -885,11 +894,12 @@ int main(int argc, char **argv)
 	if (rc)
 		goto done;
 
-	if (ikvm.keyboard_name)
+	if (ikvm.keyboard_name) {
 		init_keyboard(&ikvm);
 
-	if (ikvm.ptr_name)
+//	if (ikvm.ptr_name)
 		init_ptr(&ikvm);
+}
 
 	signal(SIGINT, int_handler);
 
