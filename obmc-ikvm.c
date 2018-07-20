@@ -198,6 +198,7 @@ struct obmc_ikvm {
 	bool dump_frames;
 	bool send_ptr;
 	bool send_report;
+	bool update_ptr_again;
 	int delay_count;
 	int num_clients;
 	int videodev_fd;
@@ -206,6 +207,10 @@ struct obmc_ikvm {
 	int keyboard_fd;
 	int ptr_fd;
 	int dump_frame_idx;
+	int client_x;
+	int client_y;
+	int prev_x;
+	int prev_y;
 	struct resolution resolution;
 	char *frame;
 	char *keyboard_name;
@@ -256,6 +261,7 @@ static int init_videodev(struct obmc_ikvm *ikvm)
 		return -EINVAL;
 	}
 
+/*
 	if (ikvm->ast_compression) {
 		fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV444;
 		rc = ioctl(ikvm->videodev_fd, VIDIOC_S_FMT, &fmt);
@@ -265,9 +271,13 @@ static int init_videodev(struct obmc_ikvm *ikvm)
 			ikvm->ast_compression = false;
 		}
 	}
+*/
 
 	ikvm->resolution.height = fmt.fmt.pix.height;
 	ikvm->resolution.width = fmt.fmt.pix.width;
+
+	ikvm->prev_x = ikvm->resolution.width / 2;
+	ikvm->prev_y = ikvm->resolution.height / 2;
 
 	ikvm->frame_buf_size = ikvm->resolution.height *
 		ikvm->resolution.width * BYTES_PER_PIXEL;
@@ -552,17 +562,44 @@ static void keyboard_send_report(struct obmc_ikvm *ikvm)
 	}
 }
 
+static bool ptr_update(struct obmc_ikvm *ikvm, int idx, int abs, int *prev)
+{
+	int d;
+	bool rc = false;
+
+	if (abs != *prev) {
+		d = abs - *prev;
+		if (d > 127) {
+			d = 127;
+			rc = true;
+		} else if (d < -127) {
+			d = -127;
+			rc = true;
+		}
+
+		ikvm->ptr[idx] = d;
+		*prev += d;
+	}
+
+	return rc;
+}
+
 static void ptr_event(int button_mask, int x, int y, rfbClientPtr cl)
 {
+	int dx;
+	int dy;
 	struct obmc_ikvm *ikvm = cl->screen->screenData;
 
 	DBG("ptr event btn[%x] x[%d] y[%d]\n", button_mask, x, y);
 
 	ikvm->ptr[0] = button_mask & 0xFF;
-	if (abs(x) < ikvm->resolution.width)
-		ikvm->ptr[1] = x / (ikvm->resolution.width / 128);
-	if (abs(y) < ikvm->resolution.height)
-		ikvm->ptr[2] = y / (ikvm->resolution.height / 128);
+
+	ikvm->client_x = x;
+	ikvm->client_y = y;
+
+	ikvm->update_ptr_again = ptr_update(ikvm, 1, x, &ikvm->prev_x);
+	ikvm->update_ptr_again = ikvm->update_ptr_again ||
+		ptr_update(ikvm, 2, y, &ikvm->prev_y);
 
 	ikvm->send_ptr = true;
 
@@ -585,6 +622,24 @@ static void init_ptr(struct obmc_ikvm *ikvm)
 
 static void ptr_send_report(struct obmc_ikvm *ikvm)
 {
+	if (ikvm->update_ptr_again) {
+		bool one_again = true;
+		bool two_again = true;
+
+		if (!ikvm->ptr[1])
+			one_again = ptr_update(ikvm, 1, ikvm->client_x,
+					       &ikvm->prev_x);
+
+		if (!ikvm->ptr[2])
+			two_again = ptr_update(ikvm, 2, ikvm->client_y,
+					       &ikvm->prev_y);
+
+		if (!one_again && !two_again)
+			ikvm->update_ptr_again = false;
+
+		ikvm->send_ptr = true;
+	}
+
 	if (ikvm->send_ptr) {
 		char rpt[PTR_SIZE + 1];
 
@@ -596,6 +651,8 @@ static void ptr_send_report(struct obmc_ikvm *ikvm)
 			printf("failed to write ptr report: %d %s\n", errno,
 			       strerror(errno));
 
+		ikvm->ptr[1] = 0;
+		ikvm->ptr[2] = 0;
 		ikvm->send_ptr = false;
 	}
 }
@@ -826,9 +883,9 @@ int main(int argc, char **argv)
 	int len;
 	int option;
 	int rc;
-	const char *opts = "adk:p:v:";
+	const char *opts = "dk:p:v:";
 	struct option lopts[] = {
-		{ "ast_compression", 0, 0, 'a' },
+//		{ "ast_compression", 0, 0, 'a' },
 		{ "dump_frames", 0, 0, 'd' },
 		{ "keyboard", 1, 0, 'k' },
 		{ "pointer", 1, 0, 'p' },
@@ -848,9 +905,11 @@ int main(int argc, char **argv)
 
 	while ((option = getopt_long(argc, argv, opts, lopts, NULL)) != -1) {
 		switch (option) {
+/*
 		case 'a':
 			ikvm.ast_compression = true;
 			break;
+*/
 		case 'd':
 			ikvm.dump_frames = true;
 			rc = mkdir(DUMP_FRAME_DIR, 0777);
@@ -896,10 +955,9 @@ int main(int argc, char **argv)
 
 	if (ikvm.keyboard_name) {
 		init_keyboard(&ikvm);
-
 //	if (ikvm.ptr_name)
 		init_ptr(&ikvm);
-}
+	}
 
 	signal(SIGINT, int_handler);
 
