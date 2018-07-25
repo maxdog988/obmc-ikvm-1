@@ -94,7 +94,7 @@ struct profile _wait;
 #define BITS_PER_SAMPLE		8
 #define BYTES_PER_PIXEL		4
 #define SAMPLES_PER_PIXEL	3
-#define PTR_SIZE		3
+#define PTR_SIZE		5
 #define REPORT_SIZE		8
 
 #define DELAY_COUNT		24
@@ -254,16 +254,6 @@ static int init_videodev(struct obmc_ikvm *ikvm)
 		printf("failed to query format: %d %s\n", errno,
 		       strerror(errno));
 		return -EINVAL;
-	}
-
-	if (ikvm->ast_compression) {
-		fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV444;
-		rc = ioctl(ikvm->videodev_fd, VIDIOC_S_FMT, &fmt);
-		if (rc < 0) {
-			printf("failed to set ast compression fmt: %d %s\n",
-			       errno, strerror(errno));
-			ikvm->ast_compression = false;
-		}
 	}
 
 	ikvm->resolution.height = fmt.fmt.pix.height;
@@ -556,10 +546,18 @@ static void ptr_event(int button_mask, int x, int y, rfbClientPtr cl)
 	DBG("ptr event btn[%x] x[%d] y[%d]\n", button_mask, x, y);
 
 	ikvm->ptr[0] = button_mask & 0xFF;
-	if (abs(x) < ikvm->resolution.width)
-		ikvm->ptr[1] = x / (ikvm->resolution.width / 128);
-	if (abs(y) < ikvm->resolution.height)
-		ikvm->ptr[2] = y / (ikvm->resolution.height / 128);
+
+	if (x >= 0 && x < ikvm->resolution.width) {
+		short xx = x * (0x8000 / ikvm->resolution.width);
+
+		memcpy(&ikvm->ptr[1], &xx, 2);
+	}
+
+	if (y >= 0 && y < ikvm->resolution.height) {
+		short yy = y * (0x8000 / ikvm->resolution.height);
+
+		memcpy(&ikvm->ptr[3], &yy, 2);
+	}
 
 	ikvm->send_ptr = true;
 
@@ -581,8 +579,8 @@ static void init_ptr(struct obmc_ikvm *ikvm)
 static void ptr_send_report(struct obmc_ikvm *ikvm)
 {
 	if (ikvm->send_ptr) {
-		DBG("sending ptr report[%02x%02x%02x]\n", ikvm->ptr[0],
-		    ikvm->ptr[1], ikvm->ptr[2]);
+		DBG("sending ptr report[%02x%02x%02x%02x%02x]\n", ikvm->ptr[0],
+		    ikvm->ptr[1], ikvm->ptr[2], ikvm->ptr[3], ikvm->ptr[4]);
 		if (write(ikvm->ptr_fd, ikvm->ptr, PTR_SIZE) != PTR_SIZE)
 			printf("failed to write ptr report: %d %s\n", errno,
 			       strerror(errno));
@@ -817,9 +815,8 @@ int main(int argc, char **argv)
 	int len;
 	int option;
 	int rc;
-	const char *opts = "adk:p:v:";
+	const char *opts = "dk:p:v:";
 	struct option lopts[] = {
-		{ "ast_compression", 0, 0, 'a' },
 		{ "dump_frames", 0, 0, 'd' },
 		{ "keyboard", 1, 0, 'k' },
 		{ "pointer", 1, 0, 'p' },
@@ -839,9 +836,6 @@ int main(int argc, char **argv)
 
 	while ((option = getopt_long(argc, argv, opts, lopts, NULL)) != -1) {
 		switch (option) {
-		case 'a':
-			ikvm.ast_compression = true;
-			break;
 		case 'd':
 			ikvm.dump_frames = true;
 			rc = mkdir(DUMP_FRAME_DIR, 0777);
