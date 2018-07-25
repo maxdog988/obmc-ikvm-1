@@ -194,7 +194,6 @@ struct resolution {
 };
 
 struct obmc_ikvm {
-	bool ast_compression;
 	bool dump_frames;
 	bool send_ptr;
 	bool send_report;
@@ -203,11 +202,14 @@ struct obmc_ikvm {
 	int videodev_fd;
 	int frame_size;
 	int frame_buf_size;
+	int input_fd;
 	int keyboard_fd;
 	int ptr_fd;
 	int dump_frame_idx;
+	size_t report_size;
 	struct resolution resolution;
 	char *frame;
+	char *input_name;
 	char *keyboard_name;
 	char *ptr_name;
 	char *videodev_name;
@@ -466,7 +468,7 @@ static void key_event(rfbBool down, rfbKeySym key, rfbClientPtr cl)
 		if (sc) {
 			unsigned int i;
 
-			for (i = 2; i < REPORT_SIZE; ++i) {
+			for (i = 2; i < ikvm->report_size; ++i) {
 				if (!ikvm->report[i]) {
 					ikvm->report[i] = sc;
 					ikvm->report_map[i - 2] = key;
@@ -490,7 +492,7 @@ static void key_event(rfbBool down, rfbKeySym key, rfbClientPtr cl)
 		unsigned char mod;
 		unsigned int i;
 
-		for (i = 0; i < REPORT_SIZE - 2; ++i) {
+		for (i = 0; i < ikvm->report_size - 2; ++i) {
 			if (ikvm->report_map[i] == key) {
 				ikvm->report_map[i] = 0;
 				ikvm->report[i + 2] = 0;
@@ -526,12 +528,27 @@ static void init_keyboard(struct obmc_ikvm *ikvm)
 static void keyboard_send_report(struct obmc_ikvm *ikvm)
 {
 	if (ikvm->send_report) {
-		unsigned char *data = ikvm->report;
+		int fd;
+		char rpt[REPORT_SIZE];
+		unsigned char *data;
+
+		if (ikvm->input_fd >= 0) {
+			fd = ikvm->input_fd;
+
+			rpt[0] = 1;
+			memcpy(&rpt[1], ikvm->report, ikvm->report_size);
+
+			data = rpt;
+		} else {
+			fd = ikvm->keyboard_fd;
+
+			data = ikvm->report;
+		}
 
 		DBG("sending kbd report[%02x%02x%02x%02x%02x%02x%02x%02x]\n",
 		    data[0], data[1], data[2], data[3], data[4], data[5],
 		    data[6], data[7]);
-		if (write(ikvm->keyboard_fd, data, REPORT_SIZE) != REPORT_SIZE)
+		if (write(fd, data, REPORT_SIZE) != REPORT_SIZE)
 			printf("failed to write keyboard report: %d %s\n",
 			       errno, strerror(errno));
 
@@ -579,14 +596,52 @@ static void init_ptr(struct obmc_ikvm *ikvm)
 static void ptr_send_report(struct obmc_ikvm *ikvm)
 {
 	if (ikvm->send_ptr) {
-		DBG("sending ptr report[%02x%02x%02x%02x%02x]\n", ikvm->ptr[0],
-		    ikvm->ptr[1], ikvm->ptr[2], ikvm->ptr[3], ikvm->ptr[4]);
-		if (write(ikvm->ptr_fd, ikvm->ptr, PTR_SIZE) != PTR_SIZE)
+		int fd;
+		char rpt[PTR_SIZE + 1];
+		size_t rs;
+		unsigned char *data;
+
+		if (ikvm->input_fd >= 0) {
+			fd = ikvm->input_fd;
+			rs = PTR_SIZE + 1;
+
+			rpt[0] = 2;
+			memcpy(&rpt[1], ikvm->ptr, PTR_SIZE);
+
+			data = rpt;
+
+			DBG("sending ptr report[%02x%02x%02x%02x%02x%02x]\n",
+			    data[0], data[1], data[2], data[3], data[4],
+			    data[5]);
+		} else {
+			fd = ikvm->ptr_fd;
+			rs = PTR_SIZE;
+
+			data = ikvm->ptr;
+
+			DBG("sending ptr report[%02x%02x%02x%02x%02x]\n",
+			    data[0], data[1], data[2], data[3], data[4]);
+		}
+
+		if (write(fd, data, rs) != rs)
 			printf("failed to write ptr report: %d %s\n", errno,
 			       strerror(errno));
 
 		ikvm->send_ptr = false;
 	}
+}
+
+static void init_input(struct obmc_ikvm *ikvm)
+{
+	ikvm->input_fd = open(ikvm->input_name, O_RDWR);
+	if (ikvm->input_fd < 0) {
+		printf("failed to open %s: %d %s\n", ikvm->input_name, errno,			      strerror(errno));
+		return;
+	}
+
+	ikvm->server->kbdAddEvent = key_event;
+	ikvm->server->ptrAddEvent = ptr_event;
+	ikvm->report_size = REPORT_SIZE - 1;
 }
 
 static void client_gone(rfbClientPtr cl)
@@ -815,9 +870,10 @@ int main(int argc, char **argv)
 	int len;
 	int option;
 	int rc;
-	const char *opts = "dk:p:v:";
+	const char *opts = "di:k:p:v:";
 	struct option lopts[] = {
 		{ "dump_frames", 0, 0, 'd' },
+		{ "input", 1, 0, 'i' },
 		{ "keyboard", 1, 0, 'k' },
 		{ "pointer", 1, 0, 'p' },
 		{ "videodev", 1, 0, 'v' },
@@ -831,8 +887,10 @@ int main(int argc, char **argv)
 
 	memset(&ikvm, 0, sizeof(struct obmc_ikvm));
 	ikvm.videodev_fd = -1;
+	ikvm.input_fd = -1;
 	ikvm.keyboard_fd = -1;
 	ikvm.ptr_fd = -1;
+	ikvm.report_size = REPORT_SIZE;
 
 	while ((option = getopt_long(argc, argv, opts, lopts, NULL)) != -1) {
 		switch (option) {
@@ -845,7 +903,20 @@ int main(int argc, char **argv)
 				ikvm.dump_frames = false;
 			}
 			break;
+		case 'i':
+			if (ikvm.keyboard_fd >= 0 || ikvm.ptr_fd >= 0)
+				break;
+
+			ikvm.input_name = malloc(strlen(optarg) + 1);
+			if (!ikvm.input_name)
+				printf("failed to allocate input name\n");
+			else
+				strcpy(ikvm.input_name, optarg);
+			break;
 		case 'k':
+			if (ikvm.input_fd >= 0)
+				break;
+
 			ikvm.keyboard_name = malloc(strlen(optarg) + 1);
 			if (!ikvm.keyboard_name)
 				printf("failed to allocate keyboard name\n");
@@ -853,6 +924,9 @@ int main(int argc, char **argv)
 				strcpy(ikvm.keyboard_name, optarg);
 			break;
 		case 'p':
+			if (ikvm.input_fd >= 0)
+				break;
+
 			ikvm.ptr_name = malloc(strlen(optarg) + 1);
 			if (!ikvm.ptr_name)
 				printf("failed to allocate ptr name\n");
@@ -879,11 +953,15 @@ int main(int argc, char **argv)
 	if (rc)
 		goto done;
 
-	if (ikvm.keyboard_name)
-		init_keyboard(&ikvm);
+	if (ikvm.input_name) {
+		init_input(&ikvm);
+	} else {
+		if (ikvm.keyboard_name)
+			init_keyboard(&ikvm);
 
-	if (ikvm.ptr_name)
-		init_ptr(&ikvm);
+		if (ikvm.ptr_name)
+			init_ptr(&ikvm);
+	}
 
 	signal(SIGINT, int_handler);
 
@@ -945,11 +1023,17 @@ done:
 	if (ikvm.videodev_fd >= 0)
 		close(ikvm.videodev_fd);
 
+	if (ikvm.input_fd >= 0)
+		close(ikvm.input_fd);
+
 	if (ikvm.keyboard_fd >= 0)
 		close(ikvm.keyboard_fd);
 
 	if (ikvm.ptr_fd >= 0)
 		close(ikvm.ptr_fd);
+
+	if (ikvm.input_name)
+		free(ikvm.input_name);
 
 	if (ikvm.keyboard_name)
 		free(ikvm.keyboard_name);
