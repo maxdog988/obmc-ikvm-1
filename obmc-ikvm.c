@@ -41,7 +41,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define _DEBUG_
+//#define _DEBUG_
 //#define _PROFILE_
 
 #ifdef _DEBUG_
@@ -86,6 +86,7 @@ void _prof(struct timespec *diff, struct profile *p)
 }
 
 struct profile _frame;
+struct profile _input;
 struct profile _wait;
 #endif /* _PROFILE_ */
 
@@ -97,8 +98,7 @@ struct profile _wait;
 #define PTR_SIZE		5
 #define REPORT_SIZE		8
 
-#define DELAY_COUNT		24
-#define PROCESS_EVENTS_TIME_US	40000 /* 24 fps */
+#define PROCESS_EVENTS_DELTA	1500
 
 #define FRAME_SIZE_BYTE_LIMIT	127
 #define FRAME_SIZE_WORD_LIMIT	16383
@@ -194,6 +194,7 @@ struct resolution {
 };
 
 struct obmc_ikvm {
+	bool dont_wait;
 	bool dump_frames;
 	bool send_ptr;
 	bool send_report;
@@ -206,6 +207,9 @@ struct obmc_ikvm {
 	int keyboard_fd;
 	int ptr_fd;
 	int dump_frame_idx;
+	int frame_rate;
+	int frame_time_us;
+	int process_events_time_us;
 	size_t report_size;
 	struct resolution resolution;
 	char *frame;
@@ -224,11 +228,51 @@ static void int_handler(int sig)
 	ok = false;
 }
 
+static int alloc_frame(struct obmc_ikvm *ikvm, struct v4l2_format *fmt)
+{
+	ikvm->resolution.height = fmt->fmt.pix.height;
+	ikvm->resolution.width = fmt->fmt.pix.width;
+
+	ikvm->frame_buf_size = ikvm->resolution.height *
+		ikvm->resolution.width * BYTES_PER_PIXEL;
+	if (!ikvm->frame_buf_size) {
+		printf("resolution invalid\n");
+		return -ENOMEM;
+	}
+
+	ikvm->frame = (char *)malloc(ikvm->frame_buf_size);
+	if (!ikvm->frame) {
+		printf("failed to allocate buffer\n");
+		return -ENOMEM;
+	}
+
+	DBG("frame buffer size: %d\n", ikvm->frame_buf_size);
+	memset(ikvm->frame, 0, ikvm->frame_buf_size);
+
+	return 0;
+}
+
+static void set_frame_rate(struct obmc_ikvm *ikvm)
+{
+	int rc;
+	struct v4l2_streamparm sparm;
+
+	sparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	sparm.parm.capture.timeperframe.numerator = 1;
+	sparm.parm.capture.timeperframe.denominator = ikvm->frame_rate;
+
+	rc = ioctl(ikvm->videodev_fd, VIDIOC_S_PARM, &sparm);
+	if (rc < 0)
+		printf("failed to set framerate; ignoring: %d %s\n", errno,
+		       strerror(errno));
+}
+
 static int init_videodev(struct obmc_ikvm *ikvm)
 {
 	int rc;
 	struct v4l2_capability cap;
         struct v4l2_format fmt;
+	struct v4l2_streamparm sparm;
 
 	ikvm->videodev_fd = open(ikvm->videodev_name, O_RDWR);
 	if (ikvm->videodev_fd < 0) {
@@ -258,22 +302,9 @@ static int init_videodev(struct obmc_ikvm *ikvm)
 		return -EINVAL;
 	}
 
-	ikvm->resolution.height = fmt.fmt.pix.height;
-	ikvm->resolution.width = fmt.fmt.pix.width;
+	set_frame_rate(ikvm);
 
-	ikvm->frame_buf_size = ikvm->resolution.height *
-		ikvm->resolution.width * BYTES_PER_PIXEL;
-
-	ikvm->frame = (char *)malloc(ikvm->frame_buf_size);
-	if (!ikvm->frame) {
-		printf("failed to allocate buffer\n");
-		return -ENOMEM;
-	}
-
-	DBG("frame buffer size: %d\n", ikvm->frame_buf_size);
-	memset(ikvm->frame, 0, ikvm->frame_buf_size);
-
-	return 0;
+	return alloc_frame(ikvm, &fmt);
 }
 
 static unsigned char key_to_mod(rfbKeySym key)
@@ -659,6 +690,8 @@ static void client_gone(rfbClientPtr cl)
 			       ikvm->videodev_name, errno, strerror(errno));
 			ok = false;
 		} else {
+			set_frame_rate(ikvm);
+
 			memset(ikvm->frame, 0, ikvm->frame_buf_size);
 			rfbMarkRectAsModified(ikvm->server, 0, 0,
 					      ikvm->resolution.width,
@@ -675,7 +708,7 @@ static enum rfbNewClientAction new_client(rfbClientPtr cl)
 	cl->clientGoneHook = client_gone;
 
 	ikvm->num_clients++;
-	ikvm->delay_count = DELAY_COUNT;
+	ikvm->delay_count = ikvm->frame_rate;
 
 	return RFB_CLIENT_ACCEPT;
 }
@@ -742,19 +775,46 @@ static void send_frame_to_clients(struct obmc_ikvm *ikvm)
 	rfbReleaseClientIterator(iterator);
 }
 
+static void wait_rfb_done() {
+	pthread_mutex_lock(&mutex);
+	pthread_cond_wait(&cond, &mutex);
+	pthread_mutex_unlock(&mutex);
+}
+
 static int get_frame(struct obmc_ikvm *ikvm)
 {
 	int rc;
-/*
-	int offs = 2;
+	struct v4l2_format fmt;
 
-	if (ikvm->frame_size > FRAME_SIZE_BYTE_LIMIT) {
-		if (ikvm->frame_size > FRAME_SIZE_WORD_LIMIT)
-			offs = 4;
-		else
-			offs = 3;
+	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	rc = ioctl(ikvm->videodev_fd, VIDIOC_G_FMT, &fmt);
+	if (rc < 0) {
+		printf("failed to query format: %d %s\n", errno,
+		       strerror(errno));
+		return -EFAULT;
 	}
-*/
+
+	if (fmt.fmt.pix.width != ikvm->resolution.width ||
+	    fmt.fmt.pix.height != ikvm->resolution.height) {
+		char *old_frame = ikvm->frame;
+
+		rc = alloc_frame(ikvm, &fmt);
+		if (rc)
+			return rc;
+
+		/* Wait for the rfb processing thread to finish it's work */
+		wait_rfb_done();
+		ikvm->dont_wait = true;
+
+		rfbNewFramebuffer(ikvm->server, ikvm->frame,
+				  ikvm->resolution.width,
+				  ikvm->resolution.height,
+				  BITS_PER_SAMPLE, SAMPLES_PER_PIXEL,
+				  BYTES_PER_PIXEL);
+
+		free(old_frame);
+	}
+
 	rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
 	if (rc < 0) {
 		printf("failed to read frame: %d %s\n", errno,
@@ -766,28 +826,6 @@ static int get_frame(struct obmc_ikvm *ikvm)
 		DBG("new frame size: %d\n", rc);
 
 	ikvm->frame_size = rc;
-/*
-	ikvm->frame[1] = rc & 0x7F;
-
-	if (rc > FRAME_SIZE_BYTE_LIMIT) {
-		if (offs == 2) {
-			if (rc > FRAME_SIZE_WORD_LIMIT)
-				memmove(&ikvm->frame[4], &ikvm->frame[2], rc);
-			else
-				memmove(&ikvm->frame[3], &ikvm->frame[2], rc);
-		}
-		ikvm->frame[1] |= 0x80;
-		ikvm->frame[2] = (rc & 0x3F80) >> 7;
-	}
-
-	if (rc > FRAME_SIZE_WORD_LIMIT) {
-		if (offs == 3)
-			memmove(&ikvm->frame[4], &ikvm->frame[3], rc);
-
-		ikvm->frame[2] |= 0x80;
-		ikvm->frame[3] = (rc & 0x3FC000) >> 14;
-	}
-*/
 	send_frame_to_clients(ikvm);
 
 	return 0;
@@ -849,15 +887,27 @@ static void dump_frame(struct obmc_ikvm *ikvm)
 
 void *threaded_process_rfb(void *ptr)
 {
+	struct timespec diff;
+	struct timespec end;
+	struct timespec start;
 	struct obmc_ikvm *ikvm = (struct obmc_ikvm *)ptr;
 
 	while (ok) {
-		rfbProcessEvents(ikvm->server, PROCESS_EVENTS_TIME_US);
-
+		rfbProcessEvents(ikvm->server, ikvm->process_events_time_us);
+#ifdef _PROFILE_
+		clock_gettime(CLOCK_MONOTONIC, &start);
+#endif /* _PROFILE_ */
 		if (ikvm->server->clientHead != NULL && ok) {
 			keyboard_send_report(ikvm);
 			ptr_send_report(ikvm);
 		}
+#ifdef _PROFILE_
+		clock_gettime(CLOCK_MONOTONIC, &end);
+		timespec_subtract(&diff, &end, &start);
+		_prof(&diff, &_input);
+		DBG("input: %lld.%.9ld\n", (long long)diff.tv_sec,
+		    diff.tv_nsec);
+#endif /* _PROFILE_ */
 
 		pthread_mutex_lock(&mutex);
 		pthread_cond_broadcast(&cond);
@@ -873,6 +923,7 @@ int main(int argc, char **argv)
 	const char *opts = "di:k:p:v:";
 	struct option lopts[] = {
 		{ "dump_frames", 0, 0, 'd' },
+		{ "frame_rate", 1, 0, 'f' },
 		{ "input", 1, 0, 'i' },
 		{ "keyboard", 1, 0, 'k' },
 		{ "pointer", 1, 0, 'p' },
@@ -886,6 +937,7 @@ int main(int argc, char **argv)
 	pthread_t rfb;
 
 	memset(&ikvm, 0, sizeof(struct obmc_ikvm));
+	ikvm.frame_rate = 30;
 	ikvm.videodev_fd = -1;
 	ikvm.input_fd = -1;
 	ikvm.keyboard_fd = -1;
@@ -903,6 +955,10 @@ int main(int argc, char **argv)
 				ikvm.dump_frames = false;
 			}
 			break;
+		case 'f':
+			ikvm.frame_rate = (int)strtol(optarg, NULL, 0);
+			if (ikvm.frame_rate < 0 || ikvm.frame_rate >= 60)
+				ikvm.frame_rate = 30;
 		case 'i':
 			if (ikvm.keyboard_fd >= 0 || ikvm.ptr_fd >= 0)
 				break;
@@ -944,6 +1000,10 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
+
+	ikvm.frame_time_us = 1000000 / ikvm.frame_rate;
+	ikvm.process_events_time_us = ikvm.frame_time_us -
+		PROCESS_EVENTS_DELTA;
 
 	rc = init_videodev(&ikvm);
 	if (rc)
@@ -994,9 +1054,10 @@ int main(int argc, char **argv)
 #ifdef _PROFILE_
 		clock_gettime(CLOCK_MONOTONIC, &start);
 #endif /* _PROFILE_ */
-		pthread_mutex_lock(&mutex);
-		pthread_cond_wait(&cond, &mutex);
-		pthread_mutex_unlock(&mutex);
+		if (!ikvm.dont_wait) {
+			wait_rfb_done();
+			ikvm.dont_wait = false;
+		}
 #ifdef _PROFILE_
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		timespec_subtract(&diff, &end, &start);
@@ -1010,6 +1071,7 @@ int main(int argc, char **argv)
 
 #ifdef _PROFILE_
 	printf("avg frame time (us): %lld\n", _avg(&_frame));
+	printf("avg input time (us): %lld\n", _avg(&_input));
 	printf("avg wait time (us): %lld\n", _avg(&_wait));
 #endif /* _PROFILE_ */
 
