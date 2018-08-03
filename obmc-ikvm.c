@@ -98,7 +98,7 @@ struct profile _wait;
 #define PTR_SIZE		5
 #define REPORT_SIZE		8
 
-#define PROCESS_EVENTS_DELTA	1500
+#define PROCESS_EVENTS_DELTA	100
 
 #define FRAME_SIZE_BYTE_LIMIT	127
 #define FRAME_SIZE_WORD_LIMIT	16383
@@ -198,6 +198,7 @@ struct obmc_ikvm {
 	bool dump_frames;
 	bool send_ptr;
 	bool send_report;
+	bool wait_next;
 	int delay_count;
 	int num_clients;
 	int videodev_fd;
@@ -276,9 +277,41 @@ static int init_videodev(struct obmc_ikvm *ikvm)
 
 	ikvm->videodev_fd = open(ikvm->videodev_name, O_RDWR);
 	if (ikvm->videodev_fd < 0) {
-		printf("failed to open %s: %d %s\n", ikvm->videodev_name,
-		       errno, strerror(errno));
-		return -ENODEV;
+		/* VGA may have gone to sleep? Try and wake it up */
+		if (ikvm->input_name) {
+			int tmp_fd = open(ikvm->input_name, O_RDWR);
+
+			if (tmp_fd >= 0) {
+				struct timespec dur;
+				short xx = 0x3FFF;
+				char rpt[PTR_SIZE + 1];
+
+				dur.tv_sec = 0;
+				dur.tv_nsec =
+					ikvm->process_events_time_us * 1000;
+
+				memset(rpt, 0, PTR_SIZE + 1);
+				rpt[0] = 2;
+				memcpy(&rpt[2], &xx, 2);
+
+				rc = write(tmp_fd, rpt, PTR_SIZE + 1);
+				if (rc == PTR_SIZE + 1) {
+					nanosleep(&dur, NULL);
+
+					memset(&rpt[1], 0, PTR_SIZE);
+					write(tmp_fd, rpt, PTR_SIZE + 1);
+				}
+
+				close(tmp_fd);
+			}
+		}
+
+		ikvm->videodev_fd = open(ikvm->videodev_name, O_RDWR);
+		if (ikvm->videodev_fd < 0) {
+			printf("failed to open %s: %d %s\n",
+			       ikvm->videodev_name, errno, strerror(errno));
+			return -ENODEV;
+		}
 	}
 
 	rc = ioctl(ikvm->videodev_fd, VIDIOC_QUERYCAP, &cap);
@@ -666,7 +699,8 @@ static void init_input(struct obmc_ikvm *ikvm)
 {
 	ikvm->input_fd = open(ikvm->input_name, O_RDWR);
 	if (ikvm->input_fd < 0) {
-		printf("failed to open %s: %d %s\n", ikvm->input_name, errno,			      strerror(errno));
+		printf("failed to open %s: %d %s\n", ikvm->input_name, errno,
+		       strerror(errno));
 		return;
 	}
 
@@ -739,6 +773,15 @@ static int init_server(struct obmc_ikvm *ikvm, int *argc, char **argv)
 
 static void send_frame_to_clients(struct obmc_ikvm *ikvm)
 {
+	if (ikvm->wait_next) {
+		ikvm->wait_next = false;
+
+		/* Wait for the rfb processing thread to finish it's work */
+		pthread_mutex_lock(&mutex);
+		pthread_cond_wait(&cond, &mutex);
+		ikvm->dont_wait = true;
+	}
+
 	rfbClientIteratorPtr iterator = rfbGetClientIterator(ikvm->server);
 	rfbClientPtr cl;
 
@@ -775,12 +818,6 @@ static void send_frame_to_clients(struct obmc_ikvm *ikvm)
 	rfbReleaseClientIterator(iterator);
 }
 
-static void wait_rfb_done() {
-	pthread_mutex_lock(&mutex);
-	pthread_cond_wait(&cond, &mutex);
-	pthread_mutex_unlock(&mutex);
-}
-
 static int get_frame(struct obmc_ikvm *ikvm)
 {
 	int rc;
@@ -803,7 +840,8 @@ static int get_frame(struct obmc_ikvm *ikvm)
 			return rc;
 
 		/* Wait for the rfb processing thread to finish it's work */
-		wait_rfb_done();
+		pthread_mutex_lock(&mutex);
+		pthread_cond_wait(&cond, &mutex);
 		ikvm->dont_wait = true;
 
 		rfbNewFramebuffer(ikvm->server, ikvm->frame,
@@ -811,8 +849,15 @@ static int get_frame(struct obmc_ikvm *ikvm)
 				  ikvm->resolution.height,
 				  BITS_PER_SAMPLE, SAMPLES_PER_PIXEL,
 				  BYTES_PER_PIXEL);
+		rfbMarkRectAsModified(ikvm->server, 0, 0,
+				      ikvm->resolution.width,
+				      ikvm->resolution.height);
 
 		free(old_frame);
+
+		/* Get the image on the next iteration */
+		ikvm->wait_next = true;
+		return 0;
 	}
 
 	rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
@@ -913,6 +958,8 @@ void *threaded_process_rfb(void *ptr)
 		pthread_cond_broadcast(&cond);
 		pthread_mutex_unlock(&mutex);
 	}
+
+	return NULL;
 }
 
 int main(int argc, char **argv)
@@ -1055,7 +1102,11 @@ int main(int argc, char **argv)
 		clock_gettime(CLOCK_MONOTONIC, &start);
 #endif /* _PROFILE_ */
 		if (!ikvm.dont_wait) {
-			wait_rfb_done();
+			pthread_mutex_lock(&mutex);
+			pthread_cond_wait(&cond, &mutex);
+			pthread_mutex_unlock(&mutex);
+		} else {
+			pthread_mutex_unlock(&mutex);
 			ikvm.dont_wait = false;
 		}
 #ifdef _PROFILE_
