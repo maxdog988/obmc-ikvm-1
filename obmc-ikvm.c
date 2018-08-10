@@ -962,15 +962,28 @@ void *threaded_process_rfb(void *ptr)
 	return NULL;
 }
 
+void usage()
+{
+	fprintf(stderr, "OpenBMC IKVM daemon\n");
+	fprintf(stderr, "Usage: obmc-ikvm [options]\n");
+	fprintf(stderr, "-f frame rate          use this frame rate\n");
+	fprintf(stderr, "-i device              HID gadget combined device\n");
+	fprintf(stderr, "-k keyboard            HID gadget keyboard device\n");
+	fprintf(stderr, "-p mouse               HID gadget mouse device\n");
+	fprintf(stderr, "-v device              V4L2 device\n");
+	rfbUsage();
+}
+
 int main(int argc, char **argv)
 {
 	int len;
 	int option;
 	int rc;
-	const char *opts = "di:k:p:v:";
+	const char *opts = "dhi:k:p:v:";
 	struct option lopts[] = {
 		{ "dump_frames", 0, 0, 'd' },
 		{ "frame_rate", 1, 0, 'f' },
+		{ "help", 0, 0, 'h' },
 		{ "input", 1, 0, 'i' },
 		{ "keyboard", 1, 0, 'k' },
 		{ "pointer", 1, 0, 'p' },
@@ -1044,6 +1057,10 @@ int main(int argc, char **argv)
 			}
 
 			strcpy(ikvm.videodev_name, optarg);
+			break;
+		case 'h':
+			usage();
+			goto done;
 			break;
 		}
 	}
