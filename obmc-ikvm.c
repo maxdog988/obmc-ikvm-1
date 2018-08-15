@@ -35,13 +35,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
-//#define _DEBUG_
+#define _DEBUG_
 //#define _PROFILE_
 
 #ifdef _DEBUG_
@@ -188,6 +189,11 @@ static volatile bool ok = true;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
+struct buffer {
+	void *frame;
+	size_t size;
+};
+
 struct resolution {
 	size_t height;
 	size_t width;
@@ -198,6 +204,7 @@ struct obmc_ikvm {
 	bool dump_frames;
 	bool send_ptr;
 	bool send_report;
+	bool streaming;
 	bool wait_next;
 	int delay_count;
 	int num_clients;
@@ -211,6 +218,8 @@ struct obmc_ikvm {
 	int frame_rate;
 	int frame_time_us;
 	int process_events_time_us;
+	int buf_count;
+	int buf_idx;
 	size_t report_size;
 	struct resolution resolution;
 	char *frame;
@@ -222,6 +231,7 @@ struct obmc_ikvm {
 	unsigned char report[REPORT_SIZE];
 	unsigned short report_map[REPORT_SIZE - 2];
 	rfbScreenInfoPtr server;
+	struct buffer *bufs;
 };
 
 static void int_handler(int sig)
@@ -240,6 +250,9 @@ static int alloc_frame(struct obmc_ikvm *ikvm, struct v4l2_format *fmt)
 		printf("resolution invalid\n");
 		return -ENOMEM;
 	}
+
+	if (ikvm->frame)
+		free(ikvm->frame);
 
 	ikvm->frame = (char *)malloc(ikvm->frame_buf_size);
 	if (!ikvm->frame) {
@@ -337,6 +350,92 @@ static int init_videodev(struct obmc_ikvm *ikvm)
 
 	set_frame_rate(ikvm);
 
+	if (ikvm->streaming && (cap.capabilities & V4L2_CAP_STREAMING)) {
+		int i;
+		struct v4l2_requestbuffers req;
+
+		req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        	req.memory = V4L2_MEMORY_MMAP;
+
+		rc = ioctl(ikvm->videodev_fd, VIDIOC_REQBUFS, &req);
+		if (rc < 0) {
+			printf("failed to request buffers: %d %s\n", errno,
+			       strerror(errno));
+			ikvm->streaming = false;
+			goto done;
+		}
+
+		DBG("got %d bufs\n", req.count);
+		ikvm->buf_count = req.count;
+
+		if (ikvm->bufs)
+			free(ikvm->bufs);
+
+		ikvm->bufs = malloc(sizeof(struct buffer) * req.count);
+		if (!ikvm->bufs) {
+			printf("failed to allocate streaming buffers\n");
+			ikvm->streaming = false;
+			goto done;
+		}
+
+		for (i = req.count - 1; i >= 0; --i) {
+			struct v4l2_buffer buf;
+
+			buf.index = i;
+			buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			buf.memory = V4L2_MEMORY_MMAP;
+			rc = ioctl(ikvm->videodev_fd, VIDIOC_QUERYBUF, &buf);
+			if (rc < 0) {
+				printf("failed to query buffer: %d %s\n",
+				       errno, strerror(errno));
+				ikvm->streaming = false;
+				goto done;
+			}
+
+			ikvm->bufs[i].size = buf.length;
+			ikvm->bufs[i].frame = mmap(NULL, buf.length,
+						   PROT_READ,
+						   MAP_SHARED,
+						   ikvm->videodev_fd,
+						   buf.m.offset);
+			if (ikvm->bufs[i].frame == MAP_FAILED) {
+				printf("failed to mmap: %d %s\n", errno,
+				       strerror(errno));
+				ikvm->streaming = false;
+				goto done;
+			}
+
+			DBG("mmapped[%p]\n", ikvm->bufs[i].frame);
+/*
+			rc = ioctl(ikvm->videodev_fd, VIDIOC_QBUF, &buf);
+			if (rc < 0) {
+				printf("failed to queue buf: %d %s\n", errno,
+				       strerror(errno));
+				ikvm->streaming = false;
+				munmap(ikvm->bufs[i].frame,
+				       ikvm->bufs[i].size);
+				goto done;
+			}
+*/
+		}
+
+/*
+		type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		rc = ioctl(ikvm->videodev_fd, VIDIOC_STREAMON, &type);
+		if (rc < 0) {
+			printf("failed to start stream: %d %s\n", errno,
+			       strerror(errno));
+			ikvm->streaming = false;
+			for (i = 0; i < ikvm->buf_count; ++i)
+				munmap(ikvm->bufs[i].frame,	
+				       ikvm->bufs[i].size);
+		}
+*/
+	} else {
+		ikvm->streaming = false;
+	}
+
+done:
 	return alloc_frame(ikvm, &fmt);
 }
 
@@ -717,8 +816,21 @@ static void client_gone(rfbClientPtr cl)
 		return;
 
 	if (ikvm->videodev_fd >= 0) {
+		if (ikvm->streaming) {
+			int i;
+
+			for (i = 0; i < ikvm->buf_count; ++i)
+				munmap(ikvm->bufs[i].frame,
+				       ikvm->bufs[i].size);
+		}
+
 		close(ikvm->videodev_fd);
-		ikvm->videodev_fd = open(ikvm->videodev_name, O_RDWR);
+
+		if (ikvm->streaming)
+			init_videodev(ikvm);
+		else
+			ikvm->videodev_fd = open(ikvm->videodev_name, O_RDWR);
+
 		if (ikvm->videodev_fd < 0) {
 			printf("failed to re-open %s: %d %s\n",
 			       ikvm->videodev_name, errno, strerror(errno));
@@ -737,12 +849,41 @@ static void client_gone(rfbClientPtr cl)
 static enum rfbNewClientAction new_client(rfbClientPtr cl)
 {
 	struct obmc_ikvm *ikvm = cl->screen->screenData;
+	int c = ikvm->num_clients;
 
 	cl->clientData = ikvm;
 	cl->clientGoneHook = client_gone;
 
 	ikvm->num_clients++;
 	ikvm->delay_count = ikvm->frame_rate;
+
+	if (!c && ikvm->streaming) {
+		int i;
+		int rc;
+		struct v4l2_buffer buf;
+		enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory = V4L2_MEMORY_MMAP;
+
+		for (i = ikvm->buf_count - 1; i >= 0; --i) {
+			buf.index = i;
+
+			rc = ioctl(ikvm->videodev_fd, VIDIOC_QBUF, &buf);
+			if (rc < 0) {
+				printf("failed to queue buf: %d %s\n", errno,
+				       strerror(errno));
+				break;
+			}
+		}
+
+		rc = ioctl(ikvm->videodev_fd, VIDIOC_STREAMON, &type);
+		if (rc < 0)
+			printf("failed to start streaming: %d %s\n", errno,
+			       strerror(errno));
+
+		ikvm->buf_idx = ikvm->buf_count - 1;
+	}
 
 	return RFB_CLIENT_ACCEPT;
 }
@@ -771,7 +912,7 @@ static int init_server(struct obmc_ikvm *ikvm, int *argc, char **argv)
 	return 0;
 }
 
-static void send_frame_to_clients(struct obmc_ikvm *ikvm)
+static void send_frame_to_clients(struct obmc_ikvm *ikvm, char *data)
 {
 	if (ikvm->wait_next) {
 		ikvm->wait_next = false;
@@ -807,7 +948,9 @@ static void send_frame_to_clients(struct obmc_ikvm *ikvm)
 
 		cl->updateBuf[cl->ublen++] = (char)(rfbTightJpeg << 4);
 
-		rfbSendCompressedDataTight(cl, ikvm->frame, ikvm->frame_size);
+		DBG("sending %d bytes at %p\n", ikvm->frame_size, data);
+		rfbSendCompressedDataTight(cl, data, ikvm->frame_size);
+		DBG("sent.\n");
 
 		if (cl->enableLastRectEncoding)
 			rfbSendLastRectMarker(cl);
@@ -822,6 +965,7 @@ static int get_frame(struct obmc_ikvm *ikvm)
 {
 	int rc;
 	struct v4l2_format fmt;
+	char *data;
 
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	rc = ioctl(ikvm->videodev_fd, VIDIOC_G_FMT, &fmt);
@@ -860,18 +1004,49 @@ static int get_frame(struct obmc_ikvm *ikvm)
 		return 0;
 	}
 
-	rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
-	if (rc < 0) {
-		printf("failed to read frame: %d %s\n", errno,
-		       strerror(errno));
-		return -EFAULT;
+	if (ikvm->streaming) {
+		struct v4l2_buffer buf;
+
+		buf.index = ikvm->buf_idx;
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory = V4L2_MEMORY_MMAP;
+
+		DBG("dequeuing buf[%d]\n", buf.index);
+
+		ikvm->buf_idx = (ikvm->buf_idx + 1) % ikvm->buf_count;
+		rc = ioctl(ikvm->videodev_fd, VIDIOC_DQBUF, &buf);
+		if (rc < 0) {
+			printf("failed to dequeue frame: %d %s\n", errno,
+			       strerror(errno));
+			return -EFAULT;
+		}
+
+		if (buf.bytesused != ikvm->frame_size)
+			DBG("new frame size: %d\n", buf.bytesused);
+
+		data = ikvm->bufs[buf.index].frame;
+		ikvm->frame_size = buf.bytesused;
+
+		buf.index = ikvm->buf_idx;
+		if (ioctl(ikvm->videodev_fd, VIDIOC_QBUF, &buf) < 0)
+			printf("failed to queue frame: %d %s\n", errno,
+			       strerror(errno));
+	} else {
+		rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
+		if (rc < 0) {
+			printf("failed to read frame: %d %s\n", errno,
+			       strerror(errno));
+			return -EFAULT;
+		}
+
+		if (rc != ikvm->frame_size)
+			DBG("new frame size: %d\n", rc);
+
+		data = ikvm->frame;
+		ikvm->frame_size = rc;
 	}
 
-	if (rc != ikvm->frame_size)
-		DBG("new frame size: %d\n", rc);
-
-	ikvm->frame_size = rc;
-	send_frame_to_clients(ikvm);
+	send_frame_to_clients(ikvm, data);
 
 	return 0;
 }
@@ -979,7 +1154,7 @@ int main(int argc, char **argv)
 	int len;
 	int option;
 	int rc;
-	const char *opts = "dhi:k:p:v:";
+	const char *opts = "dhi:k:p:sv:";
 	struct option lopts[] = {
 		{ "dump_frames", 0, 0, 'd' },
 		{ "frame_rate", 1, 0, 'f' },
@@ -987,6 +1162,7 @@ int main(int argc, char **argv)
 		{ "input", 1, 0, 'i' },
 		{ "keyboard", 1, 0, 'k' },
 		{ "pointer", 1, 0, 'p' },
+		{ "streaming", 0, 0, 's' },
 		{ "videodev", 1, 0, 'v' },
 		{ 0, 0, 0, 0 }
 	};
@@ -1048,6 +1224,9 @@ int main(int argc, char **argv)
 				printf("failed to allocate ptr name\n");
 			else
 				strcpy(ikvm.ptr_name, optarg);
+			break;
+		case 's':
+			ikvm.streaming = true;
 			break;
 		case 'v':
 			ikvm.videodev_name = malloc(strlen(optarg) + 1);
@@ -1144,6 +1323,16 @@ int main(int argc, char **argv)
 #endif /* _PROFILE_ */
 
 done:
+	if (ikvm.streaming) {
+		int i;
+
+		for (i = 0; i < ikvm.buf_count; ++i)
+			munmap(ikvm.bufs[i].frame, ikvm.bufs[i].size);
+	}
+
+	if (ikvm.bufs)
+		free(ikvm.bufs);
+
 	if (ikvm.server)
 		rfbScreenCleanup(ikvm.server);
 
