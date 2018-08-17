@@ -21,6 +21,24 @@ Video::Video(const std::string &p, int fr) :
     Open();
 }
 
+void Video::reset()
+{
+    if (fd >= 0)
+    {
+        close(fd);
+        fd = open(path.c_str(), O_RDWR);
+        if (fd < 0)
+        {
+            log<level::ERR>("Failed to re-open video device",
+                            entry("PATH=%s", path.c_str()),
+                            entry("ERROR=%s", strerror(errno)));
+            elog<OpenFailure>();
+        }
+
+        data.assign(data.size(), 0);
+    }
+}
+
 void Video::open()
 {
     int rc;
@@ -37,27 +55,32 @@ void Video::open()
     }
 
     rc = ioctl(fd, VIDIOC_QUERYCAP, &cap);
-    if (rc < 0) {
+    if (rc < 0)
+    {
         log<level::ERR>("Failed to query video device capabilities",
                         entry("ERROR=%s", strerror(errno)));
         elog<OpenFailure>();
     }
 
     if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) ||
-        !(cap.capabilities & V4L2_CAP_READWRITE)) {
+        !(cap.capabilities & V4L2_CAP_READWRITE))
+    {
         log<level::ERR>("Video device doesn't support this application");
         elog<OpenFailure>();
     }
 
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     rc = ioctl(fd, VIDIOC_G_FMT, &fmt);
-    if (rc < 0) {
+    if (rc < 0)
+    {
         log<level::ERR>("Failed to query video device format",
                         entry("ERROR=%s", strerror(errno)));
         elog<OpenFailure>();
     }
 
     setFrameRate();
+
+    resize(fmt.pix.width, fmt.pix.height);
 }
 
 void Video::resize(size_t w, size_t h)
@@ -79,8 +102,10 @@ void Video::setFrameRate()
 
     rc = ioctl(fd, VIDIOC_S_PARM, &sparm);
     if (rc < 0)
+    {
         log<level::WARN>("Failed to set video device frame rate",
                          entry("ERROR=%s", strerror(errno)));
+    }
 }
 
 } // namespace ikvm

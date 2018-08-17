@@ -5,9 +5,21 @@
 namespace ikvm
 {
 
-class Args {
+class Args
+{
     public:
+        struct CommandLine
+        {
+            int argc;
+            char **argv;
+        };
+
         Args(int argc, char *argv[]);
+
+        inline const CommandLine& getCommandLine() const
+        {
+            return commandLine;
+        }
 
         inline int getFrameRate() const
         {
@@ -30,6 +42,7 @@ class Args {
         int frameRate;
         std::string inputPath;
         std::string videoPath;
+        CommandLine commandLine;
 };
 
 } // namespace ikvm

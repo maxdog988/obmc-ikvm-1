@@ -10,12 +10,21 @@ class Video {
     public:
         Video(const std::string& p, int fr = 30);
 
-        inline size_t get_width() const {
-            return width;
+        void reset();
+
+        inline const unsigned char* getData() const
+        {
+            return data.data();
         }
 
-        inline size_t get_height() const {
+        inline size_t getHeight() const
+        {
             return height;
+        }
+
+        inline size_t getWidth() const
+        {
+            return width;
         }
 
     private:
