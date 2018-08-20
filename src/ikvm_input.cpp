@@ -1,8 +1,9 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <phosphor-logging/elog.hpp>
-#include <phosphor-logging/log.hpp>
+//#include <phosphor-logging/elog.hpp>
+//#include <phosphor-logging/log.hpp>
+#include <rfb/keysym.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -13,14 +14,16 @@
 namespace ikvm
 {
 
-const char Input::shiftCtrlMap[] = {
+//using namespace phosphor::logging;
+
+const char Input::shiftCtrlMap[4] = {
     0x02,   // left shift
     0x20,   // right shift
     0x01,   // left control
     0x10    // right control
 };
 
-const char Input::metaAltMap[] = {
+const char Input::metaAltMap[4] = {
     0x08,   // left meta
     0x80,   // right meta
     0x04,   // left alt
@@ -33,19 +36,21 @@ Input::Input(const std::string &p)
     fd = open(path.c_str(), O_RDWR);
     if (fd < 0)
     {
-        log<level::ERR>("Failed to open input device",
-                        entry("PATH=%s", path.c_str()),
-                        entry("ERROR=%s", strerror(errno)));
-        elog<OpenFailure>();
+        //log<level::ERR>("Failed to open input device",
+                        //entry("PATH=%s", path.c_str()),
+                        //entry("ERROR=%s", strerror(errno)));
+        //elog<OpenFailure>();
+        throw std::runtime_error("input");
     }
 
     keyboardReport[0] = 1;
     pointerReport[0] = 2;
 }
 
-void Input::keyEvent(rfbBool down, rgbKeySym key, rfbClientPtr cl)
+void Input::keyEvent(rfbBool down, rfbKeySym key, rfbClientPtr cl)
 {
-    Input *input = cl->clientData;
+    Server::ClientData *cd = (Server::ClientData *)cl->clientData;
+    Input *input = cd->input;
 
     if (down)
     {
@@ -103,8 +108,9 @@ void Input::keyEvent(rfbBool down, rgbKeySym key, rfbClientPtr cl)
 
 void Input::pointerEvent(int buttonMask, int x, int y, rfbClientPtr cl)
 {
-    Input *input = cl->clientData;
-    Server *server = cl->screen->screenData;
+    Server::ClientData *cd = (Server::ClientData *)cl->clientData;
+    Input *input = cd->input;
+    Server *server = (Server *)cl->screen->screenData;
     const Video& video = server->getVideo();
 
     input->pointerReport[1] = buttonMask & 0xFF;
@@ -127,14 +133,23 @@ void Input::pointerEvent(int buttonMask, int x, int y, rfbClientPtr cl)
     rfbDefaultPtrAddEvent(buttonMask, x, y, cl);
 }
 
+void Input::sendRaw(char* data, int size)
+{
+    if (write(fd, data, size) != size)
+    {
+        //log<level::ERR>("Failed to write report",
+                        //entry("ERROR=%s", strerror(errno)));
+    }
+}
+
 void Input::sendReport()
 {
     if (sendKeyboard)
     {
         if (write(fd, keyboardReport, REPORT_LENGTH) != REPORT_LENGTH)
         {
-            log<level::ERR>("Failed to write keyboard report",
-                            entry("ERROR=%s", strerror(errno)));
+            //log<level::ERR>("Failed to write keyboard report",
+                            //entry("ERROR=%s", strerror(errno)));
         }
 
         sendKeyboard = false;
@@ -142,10 +157,10 @@ void Input::sendReport()
 
     if (sendPointer)
     {
-        if (write(fd, pointerReport, REPORT_LENGTH - 2) != REPORT_LENGTH - 2)
+        if (write(fd, pointerReport, POINTER_LENGTH) != POINTER_LENGTH)
         {
-            log<level::ERR>("Failed to write pointer report",
-                            entry("ERROR=%s", strerror(errno)));
+            //log<level::ERR>("Failed to write pointer report",
+                            //entry("ERROR=%s", strerror(errno)));
         }
 
         sendPointer = false;

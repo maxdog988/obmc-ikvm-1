@@ -13,18 +13,21 @@ class Input
         Input(const std::string& p);
 
         static void keyEvent(rfbBool down, rfbKeySym key, rfbClientPtr cl);
-        static void pointerEvent(int buttonMask, int x, int y, rfbClientPtr cl);
+        static void pointerEvent(int buttonMask, int x, int y,
+                                 rfbClientPtr cl);
 
+        void sendRaw(char* data, int size);
         void sendReport();
 
     private:
         enum
         {
+            POINTER_LENGTH = 6,
             REPORT_LENGTH = 8
-        }
+        };
 
-        static const char shiftCtrlMap[];
-        static const char metaAltMap[];
+        static const char shiftCtrlMap[4];
+        static const char metaAltMap[4];
 
         static char keyToMod(rfbKeySym key);
         static char keyToScancode(rfbKeySym key);

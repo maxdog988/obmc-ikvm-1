@@ -8,7 +8,9 @@
 namespace ikvm
 {
 
-Args::Args(int argc, char *argv[])
+Args::Args(int argc, char *argv[]) :
+    frameRate(30),
+    commandLine(argc, argv)
 {
     int option;
     const char *opts = "f:hi:v:";

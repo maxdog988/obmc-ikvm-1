@@ -10,6 +10,11 @@ class Args
     public:
         struct CommandLine
         {
+            CommandLine(int c, char **v) :
+                argc(c),
+                argv(v)
+            {}
+
             int argc;
             char **argv;
         };
