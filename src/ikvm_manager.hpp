@@ -28,8 +28,8 @@ class Manager {
         bool serverDone;
         bool videoDone;
         Input input;
-        Server server;
         Video video;
+        Server server;
         std::condition_variable sync;
         std::mutex lock;
 };

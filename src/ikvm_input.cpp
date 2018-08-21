@@ -30,8 +30,10 @@ const char Input::metaAltMap[4] = {
     0x40    // right alt
 };
 
-Input::Input(const std::string &p)
-    : path(p)
+Input::Input(const std::string &p) :
+    keyboardReport{ 0 },
+    pointerReport{ 0 },
+    path(p)
 {
     fd = open(path.c_str(), O_RDWR);
     if (fd < 0)

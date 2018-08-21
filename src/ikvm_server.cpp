@@ -3,7 +3,7 @@
 #include <rfb/rfbproto.h>
 
 #include "ikvm_server.hpp"
-
+#include <iostream>
 namespace ikvm {
 
 //using namespace phosphor::logging;
@@ -73,7 +73,8 @@ void Server::sendFrame()
 
         if (cd->skipFrame)
         {
-            cd->skipFrame = false;
+std::cout << "skipping " << cl << std::endl;
+            cd->skipFrame--;
             continue;
         }
 
@@ -125,10 +126,11 @@ enum rfbNewClientAction Server::newClient(rfbClientPtr cl)
 {
     Server *server = (Server *)cl->screen->screenData;
 
-    cl->clientData = new ClientData(&server->input);
+    cl->clientData = new ClientData(server->video.getFrameRate(),
+                                    &server->input);
     cl->clientGoneHook = clientGone;
     server->numClients++;
-
+std::cout << "new client " << cl << std::endl;
     return RFB_CLIENT_ACCEPT;
 }
 

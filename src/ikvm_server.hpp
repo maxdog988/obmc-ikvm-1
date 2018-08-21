@@ -12,12 +12,12 @@ class Server {
     public:
         struct ClientData
         {
-            ClientData(Input* i) :
-                skipFrame(true),
+            ClientData(int s, Input* i) :
+                skipFrame(s),
                 input(i)
             {}
 
-            bool skipFrame;
+            int skipFrame;
             Input* input;
         };
 
