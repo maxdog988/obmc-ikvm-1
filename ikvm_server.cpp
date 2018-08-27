@@ -1,12 +1,15 @@
-//#include <phosphor-logging/elog.hpp>
-//#include <phosphor-logging/log.hpp>
+#include <phosphor-logging/elog.hpp>
+#include <phosphor-logging/log.hpp>
 #include <rfb/rfbproto.h>
+#include <xyz/openbmc_project/Common/error.hpp>
 
+#include "elog-errors.hpp"
 #include "ikvm_server.hpp"
-#include <iostream>
+
 namespace ikvm {
 
-//using namespace phosphor::logging;
+using namespace phosphor::logging;
+using namespace sdbusplus::xyz::openbmc_project::Common::Error;
 
 Server::Server(const Args& args, Input& i, Video& v) :
     numClients(0),
@@ -22,9 +25,10 @@ Server::Server(const Args& args, Input& i, Video& v) :
 
     if (!server)
     {
-        //log<level::ERR>("Failed to get VNC screen");
-        //elog<OpenFailure>();
-        throw std::runtime_error("vnc");
+        log<level::ERR>("Failed to get VNC screen due to invalid arguments");
+        elog<InvalidArgument>(
+            xyz::openbmc_project::Common::InvalidArgument::ARGUMENT_NAME(""),
+            xyz::openbmc_project::Common::InvalidArgument::ARGUMENT_VALUE(""));
     }
 
     server->screenData = this;
@@ -66,14 +70,18 @@ void Server::sendFrame()
     rfbClientIteratorPtr it = rfbGetClientIterator(server);
     rfbClientPtr cl;
 
-    while (cl = rfbClientIteratorNext(it))
+    while ((cl = rfbClientIteratorNext(it)))
     {
         ClientData *cd = (ClientData *)cl->clientData;
         rfbFramebufferUpdateMsg *fu = (rfbFramebufferUpdateMsg *)cl->updateBuf;
 
+	if (!cd)
+	{
+		continue;
+	}
+
         if (cd->skipFrame)
         {
-std::cout << "skipping " << cl << std::endl;
             cd->skipFrame--;
             continue;
         }
@@ -130,7 +138,7 @@ enum rfbNewClientAction Server::newClient(rfbClientPtr cl)
                                     &server->input);
     cl->clientGoneHook = clientGone;
     server->numClients++;
-std::cout << "new client " << cl << std::endl;
+
     return RFB_CLIENT_ACCEPT;
 }
 

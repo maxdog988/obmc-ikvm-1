@@ -1,12 +1,14 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
-//#include <phosphor-logging/elog.hpp>
-//#include <phosphor-logging/log.hpp>
+#include <phosphor-logging/elog.hpp>
+#include <phosphor-logging/log.hpp>
 #include <rfb/keysym.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <xyz/openbmc_project/Common/File/error.hpp>
 
+#include "elog-errors.hpp"
 #include "ikvm_input.hpp"
 #include "ikvm_server.hpp"
 #include "scancodes.h"
@@ -14,7 +16,8 @@
 namespace ikvm
 {
 
-//using namespace phosphor::logging;
+using namespace phosphor::logging;
+using namespace sdbusplus::xyz::openbmc_project::Common::File::Error;
 
 const char Input::shiftCtrlMap[4] = {
     0x02,   // left shift
@@ -38,11 +41,12 @@ Input::Input(const std::string &p) :
     fd = open(path.c_str(), O_RDWR);
     if (fd < 0)
     {
-        //log<level::ERR>("Failed to open input device",
-                        //entry("PATH=%s", path.c_str()),
-                        //entry("ERROR=%s", strerror(errno)));
-        //elog<OpenFailure>();
-        throw std::runtime_error("input");
+        log<level::ERR>("Failed to open input device",
+                        entry("PATH=%s", path.c_str()),
+                        entry("ERROR=%s", strerror(errno)));
+        elog<Open>(
+            xyz::openbmc_project::Common::File::Open::ERRNO(errno),
+            xyz::openbmc_project::Common::File::Open::PATH(path.c_str()));
     }
 
     keyboardReport[0] = 1;
@@ -117,14 +121,14 @@ void Input::pointerEvent(int buttonMask, int x, int y, rfbClientPtr cl)
 
     input->pointerReport[1] = buttonMask & 0xFF;
 
-    if (x >= 0 && x < video.getWidth())
+    if (x >= 0 && (unsigned int)x < video.getWidth())
     {
         unsigned short xx = x * ((SHRT_MAX + 1) / video.getWidth());
 
         memcpy(&input->pointerReport[2], &xx, 2);
     }
 
-    if (y >= 0 && y < video.getHeight())
+    if (y >= 0 && (unsigned int)y < video.getHeight())
     {
         unsigned short yy = y * ((SHRT_MAX + 1) / video.getHeight());
 
@@ -139,8 +143,8 @@ void Input::sendRaw(char* data, int size)
 {
     if (write(fd, data, size) != size)
     {
-        //log<level::ERR>("Failed to write report",
-                        //entry("ERROR=%s", strerror(errno)));
+        log<level::ERR>("Failed to write report",
+                        entry("ERROR=%s", strerror(errno)));
     }
 }
 
@@ -150,8 +154,8 @@ void Input::sendReport()
     {
         if (write(fd, keyboardReport, REPORT_LENGTH) != REPORT_LENGTH)
         {
-            //log<level::ERR>("Failed to write keyboard report",
-                            //entry("ERROR=%s", strerror(errno)));
+            log<level::ERR>("Failed to write keyboard report",
+                            entry("ERROR=%s", strerror(errno)));
         }
 
         sendKeyboard = false;
@@ -161,8 +165,8 @@ void Input::sendReport()
     {
         if (write(fd, pointerReport, POINTER_LENGTH) != POINTER_LENGTH)
         {
-            //log<level::ERR>("Failed to write pointer report",
-                            //entry("ERROR=%s", strerror(errno)));
+            log<level::ERR>("Failed to write pointer report",
+                            entry("ERROR=%s", strerror(errno)));
         }
 
         sendPointer = false;

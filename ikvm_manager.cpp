@@ -52,7 +52,7 @@ static int timespec_subtract(struct timespec *result, struct timespec *x,
 		y->tv_sec += nsec;
 	}
 
-	if (x->tv_nsec - y->tv_nsec > 1000000000ULL) {
+	if (x->tv_nsec - y->tv_nsec > 1000000000LL) {
 		long long int nsec = (x->tv_nsec - y->tv_nsec) / 1000000000ULL;
 
 		y->tv_nsec += 1000000000ULL * nsec;
@@ -189,8 +189,6 @@ void Manager::waitVideo()
     {
         sync.wait(ulock);
     }
-
-    //videoDone = false;
 }
 
 } // namespace ikvm
