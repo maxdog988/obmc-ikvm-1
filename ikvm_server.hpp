@@ -26,6 +26,7 @@ class Server {
         void resize();
         void run();
         void sendFrame();
+        void sendHextile16();
 
         inline bool wantsFrame() const
         {

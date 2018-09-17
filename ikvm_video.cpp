@@ -16,9 +16,9 @@
 namespace ikvm
 {
 
-const int Video::bitsPerSample(8);
-const int Video::bytesPerPixel(4);
-const int Video::samplesPerPixel(3);
+const int Video::bitsPerSample(5);
+const int Video::bytesPerPixel(2);
+const int Video::samplesPerPixel(1);
 
 using namespace phosphor::logging;
 using namespace sdbusplus::xyz::openbmc_project::Common::File::Error;
@@ -104,6 +104,27 @@ Video::Video(const std::string &p, Input& input, int fr) :
     width = fmt.fmt.pix.width;
 
     resize();
+}
+
+int Video::getClipCount()
+{
+    int rc;
+    struct v4l2_format fmt;
+
+    fmt.type = V4L2_BUF_TYPE_VIDEO_OVERLAY;
+    rc = ioctl(fd, VIDIOC_G_FMT, &fmt);
+    if (rc < 0) {
+        log<level::ERR>("Failed to get cliP count",
+                        entry("ERROR=%s", strerror(errno)));
+        elog<ReadFailure>(
+            xyz::openbmc_project::Common::Device::ReadFailure::
+                CALLOUT_ERRNO(errno),
+            xyz::openbmc_project::Common::Device::ReadFailure::
+                CALLOUT_DEVICE_PATH(path.c_str()));
+
+    }
+
+    return fmt.fmt.win.clipcount;
 }
 
 void Video::getFrame(bool& needsResize)

@@ -112,7 +112,8 @@ void Manager::run()
                 goto done;
             }
 
-            server.sendFrame();
+            //server.sendFrame();
+            server.sendHextile16();
             clock_gettime(CLOCK_MONOTONIC, &end);
             timespec_subtract(&diff, &end, &start);
             _prof(&diff, &_frame);

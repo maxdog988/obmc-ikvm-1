@@ -14,6 +14,7 @@ class Video {
         void getFrame(bool& needsResize);
         void reset();
         void resize();
+        int getClipCount();
 
         inline char* getData()
         {

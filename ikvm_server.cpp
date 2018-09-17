@@ -65,6 +65,79 @@ void Server::run()
     }
 }
 
+void Server::sendHextile16() {
+    rfbClientIteratorPtr it = rfbGetClientIterator(server);
+    rfbClientPtr cl;
+
+    while ((cl = rfbClientIteratorNext(it)))
+    {
+        ClientData *cd = (ClientData *)cl->clientData;
+        rfbFramebufferUpdateMsg *fu = (rfbFramebufferUpdateMsg *)cl->updateBuf;
+        int padding_len = 0, copy_len = 0;
+        int frameSize = video.getFrameSize();
+        char *copy_addr = video.getData();
+
+        if (!cd)
+        {
+            continue;
+        }
+
+        if (cd->skipFrame)
+        {
+            cd->skipFrame--;
+            continue;
+        }
+
+        if (frameSize == 0)
+		    continue;
+
+        if (cl->enableLastRectEncoding)
+		    fu->nRects = 0xFFFF;
+	    else
+		    fu->nRects = video.getClipCount();
+
+	    cl->ublen = sz_rfbFramebufferUpdateMsg;
+
+	    rfbSendUpdateBuf(cl);
+
+        if (frameSize >= (UPDATE_BUF_SIZE - cl->ublen)) {
+            padding_len = frameSize - (UPDATE_BUF_SIZE - cl->ublen);
+            memcpy(&cl->updateBuf[cl->ublen], copy_addr, (UPDATE_BUF_SIZE - cl->ublen));
+
+            copy_addr += (UPDATE_BUF_SIZE - cl->ublen);
+            cl->ublen += (UPDATE_BUF_SIZE - cl->ublen);
+            do {
+			    if (!rfbSendUpdateBuf(cl)){
+				    rfbLog("rfbSendUpdateBuf FAIL\n");
+				    continue;
+			    }
+
+                copy_len = padding_len;
+                if (padding_len > (UPDATE_BUF_SIZE - cl->ublen)) {
+                    padding_len -= (UPDATE_BUF_SIZE - cl->ublen);
+                    copy_len = (UPDATE_BUF_SIZE - cl->ublen);
+                } else
+                    padding_len = 0;
+
+                memcpy(&cl->updateBuf[cl->ublen], copy_addr, copy_len);
+                cl->ublen += copy_len;
+                copy_addr += copy_len;
+            } while(padding_len != 0 );
+        } else {
+            memcpy(&cl->updateBuf[cl->ublen], copy_addr, frameSize);
+            cl->ublen += frameSize;
+            padding_len = 0;
+        }
+
+	    if (cl->enableLastRectEncoding)
+		    rfbSendLastRectMarker(cl);
+
+	    rfbSendUpdateBuf(cl);
+    }
+
+    rfbReleaseClientIterator(it);
+}
+
 void Server::sendFrame()
 {
     rfbClientIteratorPtr it = rfbGetClientIterator(server);
