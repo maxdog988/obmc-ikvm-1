@@ -92,9 +92,9 @@ struct profile _wait;
 
 #define DUMP_FRAME_DIR		"/tmp/obmc-ikvm_frames"
 
-#define BITS_PER_SAMPLE		8
-#define BYTES_PER_PIXEL		4
-#define SAMPLES_PER_PIXEL	3
+#define BITS_PER_SAMPLE		5
+#define BYTES_PER_PIXEL		2
+#define SAMPLES_PER_PIXEL	1
 #define PTR_SIZE		5
 #define REPORT_SIZE		8
 
@@ -212,6 +212,7 @@ struct obmc_ikvm {
 	int frame_time_us;
 	int process_events_time_us;
 	size_t report_size;
+	int nRects;
 	struct resolution resolution;
 	char *frame;
 	char *input_name;
@@ -236,6 +237,7 @@ static int alloc_frame(struct obmc_ikvm *ikvm, struct v4l2_format *fmt)
 
 	ikvm->frame_buf_size = ikvm->resolution.height *
 		ikvm->resolution.width * BYTES_PER_PIXEL;
+
 	if (!ikvm->frame_buf_size) {
 		printf("resolution invalid\n");
 		return -ENOMEM;
@@ -717,8 +719,10 @@ static void client_gone(rfbClientPtr cl)
 		return;
 
 	if (ikvm->videodev_fd >= 0) {
+		printf("close(ikvm->videodev_fd)\n");
 		close(ikvm->videodev_fd);
 		ikvm->videodev_fd = open(ikvm->videodev_name, O_RDWR);
+		printf("open(ikvm->videodev_fd)\n");
 		if (ikvm->videodev_fd < 0) {
 			printf("failed to re-open %s: %d %s\n",
 			       ikvm->videodev_name, errno, strerror(errno));
@@ -749,6 +753,8 @@ static enum rfbNewClientAction new_client(rfbClientPtr cl)
 
 static int init_server(struct obmc_ikvm *ikvm, int *argc, char **argv)
 {
+	rfbPixelFormat *format;
+
 	ikvm->server = rfbGetScreen(argc, argv, ikvm->resolution.width,
 				    ikvm->resolution.height, BITS_PER_SAMPLE,
 				    SAMPLES_PER_PIXEL, BYTES_PER_PIXEL);
@@ -765,10 +771,80 @@ static int init_server(struct obmc_ikvm *ikvm, int *argc, char **argv)
 
 	rfbInitServer(ikvm->server);
 
+	format = &ikvm->server->serverFormat;
+	format->redMax = 31;
+	format->greenMax = 63;
+	format->blueMax = 31;
+	format->redShift = 11;
+	format->greenShift = 5;
+	format->blueShift = 0;
+
 	rfbMarkRectAsModified(ikvm->server, 0, 0, ikvm->resolution.width,
 			      ikvm->resolution.height);
 
 	return 0;
+}
+
+static rfbBool
+rfbHextile16(rfbClientPtr cl, struct obmc_ikvm *ikvm) {
+	struct v4l2_format fmt;
+	int err = 0;
+	uint32_t padding_len = 0;
+	uint32_t copy_len = 0;
+	char *copy_addr = ikvm->frame;
+	rfbFramebufferUpdateRectHeader rect;
+	rfbFramebufferUpdateMsg *fu =
+		(rfbFramebufferUpdateMsg *)cl->updateBuf;
+
+	if (ikvm->frame_size == 0)
+		return TRUE;
+
+	fu->type = rfbFramebufferUpdate;
+
+	if (cl->enableLastRectEncoding)
+		fu->nRects = 0xFFFF;
+	else
+		fu->nRects = Swap16IfLE(ikvm->nRects);
+
+	cl->ublen = sz_rfbFramebufferUpdateMsg;
+
+	rfbSendUpdateBuf(cl);
+
+	if (ikvm->frame_size >= (UPDATE_BUF_SIZE - cl->ublen)) {
+		padding_len = ikvm->frame_size - (UPDATE_BUF_SIZE - cl->ublen);
+		memcpy(&cl->updateBuf[cl->ublen], copy_addr, (UPDATE_BUF_SIZE - cl->ublen));
+
+		copy_addr += (UPDATE_BUF_SIZE - cl->ublen);
+		cl->ublen += (UPDATE_BUF_SIZE - cl->ublen);
+		do {
+			if (!rfbSendUpdateBuf(cl)) {
+				rfbLog("rfbSendUpdateBuf FAIL\n");
+				return FALSE;
+			}
+
+			copy_len = padding_len;
+			if (padding_len > (UPDATE_BUF_SIZE - cl->ublen)) {
+				padding_len -= (UPDATE_BUF_SIZE - cl->ublen);
+				copy_len = (UPDATE_BUF_SIZE - cl->ublen);
+			} else
+				padding_len = 0;
+
+			memcpy(&cl->updateBuf[cl->ublen], copy_addr, copy_len);
+			cl->ublen += copy_len;
+			copy_addr += copy_len;
+		} while (padding_len != 0);
+	} else {
+		memcpy(&cl->updateBuf[cl->ublen], copy_addr, ikvm->frame_size);
+		cl->ublen += ikvm->frame_size;
+		padding_len = 0;
+    }
+
+	if (cl->enableLastRectEncoding)
+		rfbSendLastRectMarker(cl);
+
+	rfbSendUpdateBuf(cl);
+
+    return TRUE;
 }
 
 static void send_frame_to_clients(struct obmc_ikvm *ikvm)
@@ -786,6 +862,10 @@ static void send_frame_to_clients(struct obmc_ikvm *ikvm)
 	rfbClientPtr cl;
 
 	while (cl = rfbClientIteratorNext(iterator)) {
+#if 1
+		rfbHextile16(cl, ikvm);
+
+#else
 		rfbFramebufferUpdateMsg *fu =
 			(rfbFramebufferUpdateMsg *)cl->updateBuf;
 
@@ -813,6 +893,7 @@ static void send_frame_to_clients(struct obmc_ikvm *ikvm)
 			rfbSendLastRectMarker(cl);
 
 		rfbSendUpdateBuf(cl);
+#endif
 	}
 
 	rfbReleaseClientIterator(iterator);
@@ -859,6 +940,17 @@ static int get_frame(struct obmc_ikvm *ikvm)
 		ikvm->wait_next = true;
 		return 0;
 	}
+
+
+	fmt.type = V4L2_BUF_TYPE_VIDEO_OVERLAY;
+	rc = ioctl(ikvm->videodev_fd, VIDIOC_G_FMT, &fmt);
+	if (rc < 0) {
+		printf("failed to query format: %d %s\n", errno,
+			strerror(errno));
+		return -EFAULT;
+	}
+
+	ikvm->nRects = fmt.fmt.win.clipcount;
 
 	rc = read(ikvm->videodev_fd, ikvm->frame, ikvm->frame_buf_size);
 	if (rc < 0) {
