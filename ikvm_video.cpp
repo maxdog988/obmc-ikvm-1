@@ -18,9 +18,9 @@
 namespace ikvm
 {
 
-const int Video::bitsPerSample(8);
-const int Video::bytesPerPixel(4);
-const int Video::samplesPerPixel(3);
+const int Video::bitsPerSample(5);
+const int Video::bytesPerPixel(2);
+const int Video::samplesPerPixel(1);
 
 using namespace phosphor::logging;
 using namespace sdbusplus::xyz::openbmc_project::Common::File::Error;
@@ -40,6 +40,24 @@ Video::Video(const std::string &p, Input& input, int fr) :
 Video::~Video()
 {
     stop();
+}
+
+int Video::getClipCount()
+{
+    int rc;
+    struct v4l2_format fmt;
+    fmt.type = V4L2_BUF_TYPE_VIDEO_OVERLAY;
+    rc = ioctl(fd, VIDIOC_G_FMT, &fmt);
+    if (rc < 0) {
+        log<level::ERR>("Failed to get clip count",
+            entry("ERROR=%s", strerror(errno)));
+        elog<ReadFailure>(
+            xyz::openbmc_project::Common::Device::ReadFailure::
+                CALLOUT_ERRNO(errno),
+            xyz::openbmc_project::Common::Device::ReadFailure::
+                CALLOUT_DEVICE_PATH(path.c_str()));
+    }
+    return fmt.fmt.win.clipcount;
 }
 
 char* Video::getData()
@@ -222,6 +240,7 @@ void Video::resize()
 
     if (needsResizeCall)
     {
+        v4l2_requestbuffers req;
         v4l2_dv_timings timings;
 
         memset(&timings, 0, sizeof(v4l2_dv_timings));
@@ -247,6 +266,22 @@ void Video::resize()
                     CALLOUT_ERRNO(errno),
                 xyz::openbmc_project::Common::Device::ReadFailure::
                     CALLOUT_DEVICE_PATH(path.c_str()));
+        }
+
+        req.count = 3;
+        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        req.memory = V4L2_MEMORY_MMAP;
+        rc = ioctl(fd, VIDIOC_REQBUFS, &req);
+        if (rc < 0 || req.count < 2)
+        {
+            log<level::ERR>("Failed to request streaming buffers",
+                entry("ERROR=%s", strerror(errno)));
+                elog<ReadFailure>(
+                    xyz::openbmc_project::Common::Device::ReadFailure::
+                        CALLOUT_ERRNO(errno),
+                    xyz::openbmc_project::Common::Device::ReadFailure::
+                    CALLOUT_DEVICE_PATH(path.c_str()));
+
         }
     }
 
@@ -329,7 +364,7 @@ void Video::start()
         return;
     }
 
-    fd = open(path.c_str(), O_RDWR);
+    fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
     if (fd < 0)
     {
         unsigned short xx = SHRT_MAX;
@@ -340,7 +375,7 @@ void Video::start()
 
         input.sendRaw(wakeupReport, 6);
 
-        fd = open(path.c_str(), O_RDWR);
+        fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
         if (fd < 0)
         {
             log<level::ERR>("Failed to open video device",

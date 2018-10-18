@@ -86,6 +86,8 @@ class Video {
             return width;
         }
 
+        int getClipCount();
+
         /* @brief Number of bits per component of a pixel */
         static const int bitsPerSample;
         /* @brief Number of bytes of storage for a pixel */

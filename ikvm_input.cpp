@@ -41,7 +41,7 @@ Input::Input(const std::string &p) :
     pointerReport{ 0 },
     path(p)
 {
-    fd = open(path.c_str(), O_RDWR);
+    fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
     if (fd < 0)
     {
         log<level::ERR>("Failed to open input device",

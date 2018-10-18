@@ -36,6 +36,15 @@ Server::Server(const Args& args, Input& i, Video& v) :
     framebuffer.resize(
         video.getHeight() * video.getWidth() * Video::bytesPerPixel, 0);
 
+    format = &server->serverFormat;
+
+    format->redMax = 31;
+    format->greenMax = 63;
+    format->blueMax = 31;
+    format->redShift = 11;
+    format->greenShift = 5;
+    format->blueShift = 0;
+
     server->screenData = this;
     server->desktopName = "OpenBMC IKVM";
     server->frameBuffer = framebuffer.data();
@@ -85,6 +94,37 @@ void Server::run()
     }
 }
 
+void Server::SendCompressedDataHextile16(rfbClientPtr cl, char *data, int frameSize)
+{
+    int padding_len = 0, copy_len = 0;
+
+    if (frameSize >= (UPDATE_BUF_SIZE - cl->ublen)) {
+        padding_len = frameSize - (UPDATE_BUF_SIZE - cl->ublen);
+        memcpy(&cl->updateBuf[cl->ublen], data, (UPDATE_BUF_SIZE - cl->ublen));
+        data += (UPDATE_BUF_SIZE - cl->ublen);
+        cl->ublen += (UPDATE_BUF_SIZE - cl->ublen);
+        do {
+            if (!rfbSendUpdateBuf(cl))
+                return;
+
+            copy_len = padding_len;
+            if (padding_len > (UPDATE_BUF_SIZE - cl->ublen)) {
+                padding_len -= (UPDATE_BUF_SIZE - cl->ublen);
+                copy_len = (UPDATE_BUF_SIZE - cl->ublen);
+            } else
+                padding_len = 0;
+
+            memcpy(&cl->updateBuf[cl->ublen], data, copy_len);
+            cl->ublen += copy_len;
+            data += copy_len;
+        } while (padding_len != 0 );
+    } else {
+        memcpy(&cl->updateBuf[cl->ublen], data, frameSize);
+        cl->ublen += frameSize;
+        padding_len = 0;
+    }
+}
+
 void Server::sendFrame()
 {
     char *data = video.getData();
@@ -114,25 +154,30 @@ void Server::sendFrame()
             continue;
         }
 
+        if (!video.getFrameSize())
+             continue;
+
         if (cl->enableLastRectEncoding)
         {
             fu->nRects = 0xFFFF;
         }
         else
         {
-            fu->nRects = Swap16IfLE(1);
+            fu->nRects = Swap16IfLE(video.getClipCount());
         }
 
         fu->type = rfbFramebufferUpdate;
         cl->ublen = sz_rfbFramebufferUpdateMsg;
         rfbSendUpdateBuf(cl);
 
+        SendCompressedDataHextile16(cl, data, video.getFrameSize());
+#if 0
         cl->tightEncoding = rfbEncodingTight;
         rfbSendTightHeader(cl, 0, 0, video.getWidth(), video.getHeight());
 
         cl->updateBuf[cl->ublen++] = (char)(rfbTightJpeg << 4);
         rfbSendCompressedDataTight(cl, data, video.getFrameSize());
-
+#endif
         if (cl->enableLastRectEncoding)
         {
             rfbSendLastRectMarker(cl);
