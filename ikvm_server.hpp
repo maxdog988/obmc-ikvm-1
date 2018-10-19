@@ -62,7 +62,7 @@ class Server {
         /* @brief Sends pending video frame to clients */
         void sendFrame();
 
-        void SendCompressedDataHextile16(rfbClientPtr cl, char *data, int frameSize);
+        void rfbSendCompressedDataHextile16(rfbClientPtr cl, char *data, int compressedLen);
 
         /*
          * @brief Indicates whether or not video data is desired

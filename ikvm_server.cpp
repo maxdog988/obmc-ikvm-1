@@ -38,11 +38,11 @@ Server::Server(const Args& args, Input& i, Video& v) :
 
     format = &server->serverFormat;
 
-    format->redMax = 31;
-    format->greenMax = 63;
-    format->blueMax = 31;
-    format->redShift = 11;
-    format->greenShift = 5;
+    format->redMax = 7;
+    format->greenMax = 7;
+    format->blueMax = 3;
+    format->redShift = 5;
+    format->greenShift = 2;
     format->blueShift = 0;
 
     server->screenData = this;
@@ -94,34 +94,22 @@ void Server::run()
     }
 }
 
-void Server::SendCompressedDataHextile16(rfbClientPtr cl, char *data, int frameSize)
+void Server::rfbSendCompressedDataHextile16(rfbClientPtr cl, char *data, int compressedLen)
 {
-    int padding_len = 0, copy_len = 0;
+    int i, portionLen;
 
-    if (frameSize >= (UPDATE_BUF_SIZE - cl->ublen)) {
-        padding_len = frameSize - (UPDATE_BUF_SIZE - cl->ublen);
-        memcpy(&cl->updateBuf[cl->ublen], data, (UPDATE_BUF_SIZE - cl->ublen));
-        data += (UPDATE_BUF_SIZE - cl->ublen);
-        cl->ublen += (UPDATE_BUF_SIZE - cl->ublen);
-        do {
+    portionLen = UPDATE_BUF_SIZE;
+
+    for (i = 0; i < compressedLen; i += portionLen) {
+        if (i + portionLen > compressedLen) {
+            portionLen = compressedLen - i;
+        }
+        if (cl->ublen + portionLen > UPDATE_BUF_SIZE) {
             if (!rfbSendUpdateBuf(cl))
                 return;
-
-            copy_len = padding_len;
-            if (padding_len > (UPDATE_BUF_SIZE - cl->ublen)) {
-                padding_len -= (UPDATE_BUF_SIZE - cl->ublen);
-                copy_len = (UPDATE_BUF_SIZE - cl->ublen);
-            } else
-                padding_len = 0;
-
-            memcpy(&cl->updateBuf[cl->ublen], data, copy_len);
-            cl->ublen += copy_len;
-            data += copy_len;
-        } while (padding_len != 0 );
-    } else {
-        memcpy(&cl->updateBuf[cl->ublen], data, frameSize);
-        cl->ublen += frameSize;
-        padding_len = 0;
+        }
+        memcpy(&cl->updateBuf[cl->ublen], &data[i], portionLen);
+        cl->ublen += portionLen;
     }
 }
 
@@ -170,7 +158,7 @@ void Server::sendFrame()
         cl->ublen = sz_rfbFramebufferUpdateMsg;
         rfbSendUpdateBuf(cl);
 
-        SendCompressedDataHextile16(cl, data, video.getFrameSize());
+        rfbSendCompressedDataHextile16(cl, data, video.getFrameSize());
 #if 0
         cl->tightEncoding = rfbEncodingTight;
         rfbSendTightHeader(cl, 0, 0, video.getWidth(), video.getHeight());
