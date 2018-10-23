@@ -1,17 +1,17 @@
-#include <thread>
 #include "ikvm_manager.hpp"
+
+#include <thread>
 
 namespace ikvm
 {
 
 Manager::Manager(const Args& args) :
-    continueExecuting(true),
-    serverDone(false),
-    videoDone(true),
+    continueExecuting(true), serverDone(false), videoDone(true),
     input(args.getInputPath()),
-    video(args.getVideoPath(), input, args.getFrameRate()),
+    video(args.getVideoPath(), args.getEncoding(), input, args.getFrameRate()),
     server(args, input, video)
-{}
+{
+}
 
 void Manager::run()
 {

@@ -1,41 +1,46 @@
+#include "ikvm_video.hpp"
+
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/videodev2.h>
-#include <phosphor-logging/elog.hpp>
-#include <phosphor-logging/elog-errors.hpp>
-#include <phosphor-logging/log.hpp>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#include <phosphor-logging/elog-errors.hpp>
+#include <phosphor-logging/elog.hpp>
+#include <phosphor-logging/log.hpp>
 #include <xyz/openbmc_project/Common/Device/error.hpp>
 #include <xyz/openbmc_project/Common/File/error.hpp>
 
-#include "ikvm_video.hpp"
+#define V4L2_PIX_FMT_RFB_HEXTILE16     v4l2_fourcc('H', 'X', '1', '6')
+#define V4L2_PIX_FMT_RFB_RAW16     v4l2_fourcc('R', 'W', '1', '6')
 
 namespace ikvm
 {
 
-const int Video::bitsPerSample(5);
-const int Video::bytesPerPixel(2);
-const int Video::samplesPerPixel(1);
+int Video::bitsPerSample(5);
+int Video::bytesPerPixel(2);
+int Video::samplesPerPixel(1);
+int Video::redMax(31);
+int Video::greenMax(63);
+int Video::blueMax(31);
+int Video::redShift(11);
+int Video::greenShift(5);
+int Video::blueShift(0);
 
 using namespace phosphor::logging;
 using namespace sdbusplus::xyz::openbmc_project::Common::File::Error;
 using namespace sdbusplus::xyz::openbmc_project::Common::Device::Error;
 
-Video::Video(const std::string &p, Input& input, int fr) :
-    resizeAfterOpen(false),
-    fd(-1),
-    frameRate(fr),
-    lastFrameIndex(-1),
-    height(600),
-    width(800),
-    input(input),
-    path(p)
-{}
+Video::Video(const std::string& p, const std::string &e, Input& input, int fr) :
+    resizeAfterOpen(false), fd(-1), frameRate(fr), lastFrameIndex(-1),
+    height(600), width(800), input(input), path(p), encoding(e)
+{
+}
 
 Video::~Video()
 {
@@ -64,7 +69,7 @@ char* Video::getData()
 {
     if (lastFrameIndex >= 0)
     {
-         return (char*)buffers[lastFrameIndex].data;
+        return (char*)buffers[lastFrameIndex].data;
     }
 
     return nullptr;
@@ -110,7 +115,7 @@ void Video::getFrame()
     {
         for (unsigned int i = 0; i < buffers.size(); ++i)
         {
-            if (i == (unsigned int )lastFrameIndex)
+            if (i == (unsigned int)lastFrameIndex)
             {
                 continue;
             }
@@ -192,6 +197,7 @@ void Video::resize()
     unsigned int i;
     bool needsResizeCall(false);
     v4l2_buf_type type(V4L2_BUF_TYPE_VIDEO_CAPTURE);
+    v4l2_requestbuffers req;
 
     if (fd < 0)
     {
@@ -240,8 +246,23 @@ void Video::resize()
 
     if (needsResizeCall)
     {
-        v4l2_requestbuffers req;
         v4l2_dv_timings timings;
+
+        memset(&req, 0, sizeof(v4l2_requestbuffers));
+        req.count = 0;
+        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        req.memory = V4L2_MEMORY_MMAP;
+        rc = ioctl(fd, VIDIOC_REQBUFS, &req);
+        if (rc < 0)
+        {
+            log<level::ERR>("Failed to zero streaming buffers",
+                            entry("ERROR=%s", strerror(errno)));
+            elog<ReadFailure>(
+                xyz::openbmc_project::Common::Device::ReadFailure::
+                    CALLOUT_ERRNO(errno),
+                xyz::openbmc_project::Common::Device::ReadFailure::
+                    CALLOUT_DEVICE_PATH(path.c_str()));
+        }
 
         memset(&timings, 0, sizeof(v4l2_dv_timings));
         rc = ioctl(fd, VIDIOC_QUERY_DV_TIMINGS, &timings);
@@ -268,22 +289,26 @@ void Video::resize()
                     CALLOUT_DEVICE_PATH(path.c_str()));
         }
 
-        req.count = 3;
-        req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        req.memory = V4L2_MEMORY_MMAP;
-        rc = ioctl(fd, VIDIOC_REQBUFS, &req);
-        if (rc < 0 || req.count < 2)
-        {
-            log<level::ERR>("Failed to request streaming buffers",
-                entry("ERROR=%s", strerror(errno)));
-                elog<ReadFailure>(
-                    xyz::openbmc_project::Common::Device::ReadFailure::
-                        CALLOUT_ERRNO(errno),
-                    xyz::openbmc_project::Common::Device::ReadFailure::
-                    CALLOUT_DEVICE_PATH(path.c_str()));
-
-        }
+        buffers.clear();
     }
+
+    memset(&req, 0, sizeof(v4l2_requestbuffers));
+    req.count = 3;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_MMAP;
+    rc = ioctl(fd, VIDIOC_REQBUFS, &req);
+    if (rc < 0 || req.count < 2)
+    {
+        log<level::ERR>("Failed to request streaming buffers",
+                        entry("ERROR=%s", strerror(errno)));
+        elog<ReadFailure>(
+            xyz::openbmc_project::Common::Device::ReadFailure::CALLOUT_ERRNO(
+                errno),
+            xyz::openbmc_project::Common::Device::ReadFailure::
+                CALLOUT_DEVICE_PATH(path.c_str()));
+    }
+
+    buffers.resize(req.count);
 
     for (i = 0; i < buffers.size(); ++i)
     {
@@ -342,8 +367,8 @@ void Video::resize()
         log<level::ERR>("Failed to start streaming",
                         entry("ERROR=%s", strerror(errno)));
         elog<ReadFailure>(
-            xyz::openbmc_project::Common::Device::ReadFailure::
-                CALLOUT_ERRNO(errno),
+            xyz::openbmc_project::Common::Device::ReadFailure::CALLOUT_ERRNO(
+                errno),
             xyz::openbmc_project::Common::Device::ReadFailure::
                 CALLOUT_DEVICE_PATH(path.c_str()));
     }
@@ -356,7 +381,6 @@ void Video::start()
     size_t oldWidth = width;
     v4l2_capability cap;
     v4l2_format fmt;
-    v4l2_requestbuffers req;
     v4l2_streamparm sparm;
 
     if (fd >= 0)
@@ -364,18 +388,18 @@ void Video::start()
         return;
     }
 
-    fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
+    fd = open(path.c_str(), O_RDWR);
     if (fd < 0)
     {
         unsigned short xx = SHRT_MAX;
-        char wakeupReport[6] = { 0 };
+        char wakeupReport[6] = {0};
 
         wakeupReport[0] = 2;
         memcpy(&wakeupReport[2], &xx, 2);
 
         input.sendRaw(wakeupReport, 6);
 
-        fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
+        fd = open(path.c_str(), O_RDWR);
         if (fd < 0)
         {
             log<level::ERR>("Failed to open video device",
@@ -394,8 +418,8 @@ void Video::start()
         log<level::ERR>("Failed to query video device capabilities",
                         entry("ERROR=%s", strerror(errno)));
         elog<ReadFailure>(
-            xyz::openbmc_project::Common::Device::ReadFailure::
-                CALLOUT_ERRNO(errno),
+            xyz::openbmc_project::Common::Device::ReadFailure::CALLOUT_ERRNO(
+                errno),
             xyz::openbmc_project::Common::Device::ReadFailure::
                 CALLOUT_DEVICE_PATH(path.c_str()));
     }
@@ -411,14 +435,35 @@ void Video::start()
 
     memset(&fmt, 0, sizeof(v4l2_format));
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (!encoding.compare("rfb_hextile16")) {
+        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RFB_HEXTILE16;
+    } else if (!encoding.compare("rfb_raw16")) {
+        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RFB_RAW16;
+    } else {
+        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565;
+    }
+    rc = ioctl(fd, VIDIOC_S_FMT, &fmt);
+    if (rc < 0)
+    {
+        log<level::ERR>("Failed to set video device format",
+                        entry("ERROR=%s", strerror(errno)));
+        elog<ReadFailure>(
+            xyz::openbmc_project::Common::Device::ReadFailure::CALLOUT_ERRNO(
+                errno),
+            xyz::openbmc_project::Common::Device::ReadFailure::
+                CALLOUT_DEVICE_PATH(path.c_str()));
+    }
+
+    memset(&fmt, 0, sizeof(v4l2_format));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     rc = ioctl(fd, VIDIOC_G_FMT, &fmt);
     if (rc < 0)
     {
         log<level::ERR>("Failed to query video device format",
                         entry("ERROR=%s", strerror(errno)));
         elog<ReadFailure>(
-            xyz::openbmc_project::Common::Device::ReadFailure::
-                CALLOUT_ERRNO(errno),
+            xyz::openbmc_project::Common::Device::ReadFailure::CALLOUT_ERRNO(
+                errno),
             xyz::openbmc_project::Common::Device::ReadFailure::
                 CALLOUT_DEVICE_PATH(path.c_str()));
     }
@@ -436,24 +481,6 @@ void Video::start()
 
     height = fmt.fmt.pix.height;
     width = fmt.fmt.pix.width;
-
-    memset(&req, 0, sizeof(v4l2_requestbuffers));
-    req.count = 3;
-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    req.memory = V4L2_MEMORY_MMAP;
-    rc = ioctl(fd, VIDIOC_REQBUFS, &req);
-    if (rc < 0 || req.count < 2)
-    {
-        log<level::ERR>("Failed to request streaming buffers",
-                        entry("ERROR=%s", strerror(errno)));
-        elog<ReadFailure>(
-            xyz::openbmc_project::Common::Device::ReadFailure::
-                CALLOUT_ERRNO(errno),
-            xyz::openbmc_project::Common::Device::ReadFailure::
-                CALLOUT_DEVICE_PATH(path.c_str()));
-    }
-
-    buffers.resize(req.count);
 
     resize();
 
