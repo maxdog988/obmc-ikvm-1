@@ -388,7 +388,7 @@ void Video::start()
         return;
     }
 
-    fd = open(path.c_str(), O_RDWR);
+    fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
     if (fd < 0)
     {
         unsigned short xx = SHRT_MAX;
@@ -399,7 +399,7 @@ void Video::start()
 
         input.sendRaw(wakeupReport, 6);
 
-        fd = open(path.c_str(), O_RDWR);
+        fd = open(path.c_str(), O_RDWR | O_NONBLOCK);
         if (fd < 0)
         {
             log<level::ERR>("Failed to open video device",
